@@ -14,10 +14,16 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
+import net.minecraft.component.type.ItemEnchantmentsComponent;
+import net.minecraft.enchantment.Enchantment;
+import net.minecraft.enchantment.Enchantments;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
+import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.registry.tag.FluidTags;
+import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
@@ -38,12 +44,12 @@ import java.util.Set;
 /**
  * Legit yardımcı otomasyon: hedefe yürür, bloğa bakar (kamera görünür şekilde döner),
  * gerçek bakış ışınıyla (raycast) vurduğu bloğu kırar / eker.
+ *
+ * Tuşlar: G = aç/kapat, R + G = ayar menüsü.
  */
 public class AutoFarmClient implements ClientModInitializer {
     private static final int SEARCH_RADIUS = 12;     // hedef arama yarıçapı
     private static final double WALK_STOP = 3.0;     // hedefe bu kadar yaklaşınca dur
-    private static final float LOOK_STEP = 15f;      // tick başına en fazla dönüş (derece)
-    private static final int ACTION_DELAY = 3;       // iki işlem arası tick
     private static final int AIM_TICKS = 2;          // işlemden önce hedefe sabit bakma süresi
     private static final int TARGET_TIMEOUT = 120;   // hedefe ulaşamazsa vazgeç (tick)
 
@@ -55,8 +61,10 @@ public class AutoFarmClient implements ClientModInitializer {
             "3: Kır + Ek (kırar ve geri eker)"
     };
 
+    private final AutoFarmConfig cfg = AutoFarmConfig.get();
+
     private boolean enabled = false;
-    private int mode = 0;
+    private boolean openGui = false;
 
     private BlockPos targetPos;
     private Kind targetKind;
@@ -69,44 +77,60 @@ public class AutoFarmClient implements ClientModInitializer {
     private final Set<Integer> ignoredItems = new HashSet<>();
 
     private KeyBinding toggleKey;
-    private KeyBinding modeKey;
+    private KeyBinding guiModKey;
 
     @Override
     public void onInitializeClient() {
+        cfg.load();
+
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.autofarm.toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_R, "category.autofarm"));
-        modeKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.autofarm.mode", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_G, "category.autofarm"));
+                "key.autofarm.toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_G, "category.autofarm"));
+        guiModKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.autofarm.guimod", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_R, "category.autofarm"));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
 
+        // /autofarm, /autofarm gui, /autofarm mode <1-3>, /autofarm speed <1-10>
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
                 dispatcher.register(ClientCommandManager.literal("autofarm")
                         .executes(ctx -> {
                             toggle(MinecraftClient.getInstance());
                             return 1;
                         })
+                        .then(ClientCommandManager.literal("gui")
+                                .executes(ctx -> {
+                                    openGui = true;   // sohbet kapandıktan sonra bir sonraki tickte açılır
+                                    return 1;
+                                }))
                         .then(ClientCommandManager.literal("mode")
                                 .then(ClientCommandManager.argument("n", IntegerArgumentType.integer(1, 3))
                                         .executes(ctx -> {
-                                            setMode(MinecraftClient.getInstance(),
-                                                    IntegerArgumentType.getInteger(ctx, "n") - 1);
+                                            cfg.mode = IntegerArgumentType.getInteger(ctx, "n") - 1;
+                                            cfg.save();
+                                            resetState(MinecraftClient.getInstance());
+                                            say(MinecraftClient.getInstance(), "Mod -> " + MODE_NAMES[cfg.mode]);
+                                            return 1;
+                                        })))
+                        .then(ClientCommandManager.literal("speed")
+                                .then(ClientCommandManager.argument("n", IntegerArgumentType.integer(1, 10))
+                                        .executes(ctx -> {
+                                            cfg.speed = IntegerArgumentType.getInteger(ctx, "n");
+                                            cfg.save();
+                                            say(MinecraftClient.getInstance(), "Hız -> " + cfg.speed + "/10");
                                             return 1;
                                         })))));
     }
 
     // ------------------------------------------------------------------ kontrol
 
-    private void toggle(MinecraftClient mc) {
-        enabled = !enabled;
-        resetState(mc);
-        say(mc, "AutoFarm " + (enabled ? "AÇIK" : "KAPALI") + " | Mod " + MODE_NAMES[mode]);
+    public boolean isEnabled() {
+        return enabled;
     }
 
-    private void setMode(MinecraftClient mc, int m) {
-        mode = m;
+    public void toggle(MinecraftClient mc) {
+        enabled = !enabled;
         resetState(mc);
-        say(mc, "Mod -> " + MODE_NAMES[mode]);
+        say(mc, "AutoFarm " + (enabled ? "AÇIK" : "KAPALI") + " | Mod " + MODE_NAMES[cfg.mode]);
     }
 
     private void resetState(MinecraftClient mc) {
@@ -130,12 +154,37 @@ public class AutoFarmClient implements ClientModInitializer {
         }
     }
 
+    // Hız ayarı (1..10): bakış dönüş hızı ve işlemler arası bekleme
+    private float lookStep() {
+        return 5f + 3f * cfg.speed;           // 8 .. 35 derece/tick
+    }
+
+    private int actionDelay() {
+        return Math.max(1, 11 - cfg.speed);   // 10 .. 1 tick
+    }
+
     // ------------------------------------------------------------------ ana döngü
 
     private void onTick(MinecraftClient mc) {
         tickCounter++;
-        while (toggleKey.wasPressed()) toggle(mc);
-        while (modeKey.wasPressed()) setMode(mc, (mode + 1) % MODE_NAMES.length);
+
+        while (toggleKey.wasPressed()) {
+            if (guiModKey.isPressed()) {
+                openGui = true;
+            } else {
+                toggle(mc);
+            }
+        }
+        while (guiModKey.wasPressed()) {
+            // yalnızca tüketiliyor; R tek başına bir şey yapmaz
+        }
+
+        if (openGui && mc.player != null && mc.currentScreen == null) {
+            openGui = false;
+            releaseKeys(mc);
+            mc.setScreen(new AutoFarmScreen(this));
+            return;
+        }
 
         if (warnCooldown > 0) warnCooldown--;
         if (actionCooldown > 0) actionCooldown--;
@@ -152,29 +201,34 @@ public class AutoFarmClient implements ClientModInitializer {
         }
         if (tickCounter % 1200 == 0) ignoredItems.clear();
 
-        // Elde ekin gerekliliği
-        Hand plantHand = null;
-        Block plantBlock = null;
-        if (mode == 2) {
-            if (isSeed(mc.player.getStackInHand(Hand.OFF_HAND))) {
-                plantHand = Hand.OFF_HAND;
-            } else {
-                warn(mc, "Mod 3 için 2. ele ekin (tohum/havuç/patates...) al!");
+        boolean harvestMode = cfg.mode == 0 || cfg.mode == 2;
+        boolean plantMode = cfg.mode == 1 || cfg.mode == 2;
+
+        // Alet zorunlulukları (kırma modlarında ana el)
+        if (harvestMode) {
+            ItemStack tool = mc.player.getMainHandStack();
+            if (cfg.requireHoe && !tool.isIn(ItemTags.HOES)) {
+                warn(mc, "Ana ele çapa al! (Çapa zorunluluğu açık)");
                 releaseKeys(mc);
                 return;
             }
-        } else if (mode == 1) {
-            if (isSeed(mc.player.getStackInHand(Hand.MAIN_HAND))) {
-                plantHand = Hand.MAIN_HAND;
-            } else if (isSeed(mc.player.getStackInHand(Hand.OFF_HAND))) {
-                plantHand = Hand.OFF_HAND;
-            } else {
-                warn(mc, "Ekmek için elinde ekin olmalı!");
+            if (cfg.requireFortune && fortuneLevel(tool) < 3) {
+                warn(mc, "Ana elde Servet III alet olmalı! (Servet III zorunluluğu açık)");
                 releaseKeys(mc);
                 return;
             }
         }
-        if (plantHand != null) {
+
+        // Ekim için elde seçili ekin
+        Hand plantHand = null;
+        Block plantBlock = null;
+        if (plantMode) {
+            plantHand = findPlantHand(mc, cfg.mode == 1);   // Mod 2: ana/2. el, Mod 3: sadece 2. el
+            if (plantHand == null) {
+                supply(mc);
+                releaseKeys(mc);
+                return;
+            }
             plantBlock = ((BlockItem) mc.player.getStackInHand(plantHand).getItem()).getBlock();
         }
 
@@ -256,7 +310,7 @@ public class AutoFarmClient implements ClientModInitializer {
         if (targetKind == Kind.HARVEST) {
             mc.interactionManager.attackBlock(targetPos, bhr.getSide());
             p.swingHand(Hand.MAIN_HAND);
-            if (mode == 2) {
+            if (cfg.mode == 2) {
                 replant.put(targetPos.toImmutable(), tickCounter + 100);
             }
         } else {
@@ -268,15 +322,45 @@ public class AutoFarmClient implements ClientModInitializer {
                 blacklist.put(targetPos.toImmutable(), tickCounter + 200);
             }
         }
-        actionCooldown = ACTION_DELAY;
+        actionCooldown = actionDelay();
         clearTarget();
+    }
+
+    // ------------------------------------------------------------------ ekin elde tutma / çantadan alma
+
+    private Hand findPlantHand(MinecraftClient mc, boolean allowMain) {
+        ClientPlayerEntity p = mc.player;
+        if (allowMain && isSelectedSeed(p.getMainHandStack())) return Hand.MAIN_HAND;
+        if (isSelectedSeed(p.getOffHandStack())) return Hand.OFF_HAND;
+        return null;
+    }
+
+    /** Çantadaki seçili ekini 2. ele alır. */
+    private void supply(MinecraftClient mc) {
+        ClientPlayerEntity p = mc.player;
+        ItemStack off = p.getOffHandStack();
+        if (!off.isEmpty() && !isSeed(off)) {
+            warn(mc, "2. el dolu! Ekin otomatik 2. ele alınır, eli boşalt.");
+            return;
+        }
+        if (actionCooldown > 0) return;
+        for (int i = 0; i < 36; i++) {
+            if (isSelectedSeed(p.getInventory().getStack(i))) {
+                int slot = i < 9 ? i + 36 : i;
+                mc.interactionManager.clickSlot(p.playerScreenHandler.syncId, slot, 40,
+                        SlotActionType.SWAP, p);
+                actionCooldown = 10;
+                return;
+            }
+        }
+        warn(mc, "Çantada seçili ekin bulunamadı!");
     }
 
     // ------------------------------------------------------------------ hedef bulma
 
     private void findTarget(MinecraftClient mc, Block plantBlock) {
         ClientPlayerEntity p = mc.player;
-        boolean harvest = (mode == 0 || mode == 2);
+        boolean harvest = (cfg.mode == 0 || cfg.mode == 2);
         Vec3d eye = p.getEyePos();
         BlockPos origin = p.getBlockPos();
 
@@ -290,10 +374,10 @@ public class AutoFarmClient implements ClientModInitializer {
             if (blacklist.containsKey(pos)) continue;
             BlockState s = mc.world.getBlockState(pos);
             Kind k = null;
-            if (harvest && isMature(s)) {
+            if (harvest && isMature(s) && cfg.isSelected(s.getBlock())) {
                 k = Kind.HARVEST;
             } else if (plantBlock != null && s.isAir()
-                    && (mode == 1 || replant.containsKey(pos))
+                    && (cfg.mode == 1 || replant.containsKey(pos))
                     && plantBlock.getDefaultState().canPlaceAt(mc.world, pos)) {
                 k = Kind.PLANT;
             }
@@ -338,7 +422,10 @@ public class AutoFarmClient implements ClientModInitializer {
 
     private boolean targetStillValid(MinecraftClient mc, Block plantBlock) {
         return switch (targetKind) {
-            case HARVEST -> isMature(mc.world.getBlockState(targetPos));
+            case HARVEST -> {
+                BlockState s = mc.world.getBlockState(targetPos);
+                yield isMature(s) && cfg.isSelected(s.getBlock());
+            }
             case PLANT -> plantBlock != null
                     && mc.world.getBlockState(targetPos).isAir()
                     && plantBlock.getDefaultState().canPlaceAt(mc.world, targetPos);
@@ -375,6 +462,7 @@ public class AutoFarmClient implements ClientModInitializer {
 
     /** Kamerayı hedefe doğru kademeli çevirir; kalan yaw hatasını (derece) döndürür. */
     private float lookAt(ClientPlayerEntity p, Vec3d target) {
+        float step = lookStep();
         Vec3d eye = p.getEyePos();
         double dx = target.x - eye.x;
         double dy = target.y - eye.y;
@@ -387,10 +475,10 @@ public class AutoFarmClient implements ClientModInitializer {
         float yawDiff = MathHelper.wrapDegrees(wantYaw - p.getYaw());
         float pitchDiff = wantPitch - p.getPitch();
 
-        p.setYaw(p.getYaw() + MathHelper.clamp(yawDiff, -LOOK_STEP, LOOK_STEP));
-        p.setPitch(MathHelper.clamp(p.getPitch() + MathHelper.clamp(pitchDiff, -LOOK_STEP, LOOK_STEP), -90f, 90f));
+        p.setYaw(p.getYaw() + MathHelper.clamp(yawDiff, -step, step));
+        p.setPitch(MathHelper.clamp(p.getPitch() + MathHelper.clamp(pitchDiff, -step, step), -90f, 90f));
 
-        return Math.abs(yawDiff) > LOOK_STEP ? Math.abs(yawDiff) - LOOK_STEP : 0f;
+        return Math.abs(yawDiff) > step ? Math.abs(yawDiff) - step : 0f;
     }
 
     private void walk(MinecraftClient mc, boolean forward) {
@@ -443,5 +531,19 @@ public class AutoFarmClient implements ClientModInitializer {
         if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem bi)) return false;
         Block b = bi.getBlock();
         return b instanceof CropBlock || b instanceof NetherWartBlock;
+    }
+
+    private boolean isSelectedSeed(ItemStack stack) {
+        return isSeed(stack) && cfg.isSelected(((BlockItem) stack.getItem()).getBlock());
+    }
+
+    private static int fortuneLevel(ItemStack stack) {
+        ItemEnchantmentsComponent ench = stack.getEnchantments();
+        for (RegistryEntry<Enchantment> e : ench.getEnchantments()) {
+            if (e.matchesKey(Enchantments.FORTUNE)) {
+                return ench.getLevel(e);
+            }
+        }
+        return 0;
     }
 }
