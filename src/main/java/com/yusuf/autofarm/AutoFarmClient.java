@@ -318,18 +318,16 @@ public class AutoFarmClient implements ClientModInitializer {
                 // Araya başka bir ekin girdiyse, ışının gösterdiği geçerli hedefi kullan
                 if (!ok) {
                     BlockPos hp = b.getBlockPos();
-                    BlockPos feet = feetCell(p);
-                    boolean sameLevel = hp.getY() == feet.getY();
                     BlockState hs = mc.world.getBlockState(hp);
                     boolean harvestMode = cfg.mode == 0 || cfg.mode == 2;
-                    if (sameLevel && harvestMode && isMature(hs) && cfg.isSelected(hs.getBlock())
+                    if (sameLevel(mc, hp) && harvestMode && isMature(hs) && cfg.isSelected(hs.getBlock())
                             && !blacklist.containsKey(hp)) {
                         targetPos = hp.toImmutable();
                         targetKind = Kind.HARVEST;
                         ok = true;
                     } else if (plantBlock != null && b.getSide() == Direction.UP) {
                         BlockPos above = hp.up();
-                        if (above.getY() == feet.getY()
+                        if (sameLevel(mc, above)
                                 && mc.world.getBlockState(above).isAir()
                                 && (cfg.mode == 1 || replant.containsKey(above))
                                 && plantBlock.getDefaultState().canPlaceAt(mc.world, above)) {
@@ -421,9 +419,10 @@ public class AutoFarmClient implements ClientModInitializer {
         Kind bestKind = null;
 
         for (BlockPos pos : BlockPos.iterate(
-                origin.add(-SEARCH_RADIUS, 0, -SEARCH_RADIUS),
-                origin.add(SEARCH_RADIUS, 0, SEARCH_RADIUS))) {
+                origin.add(-SEARCH_RADIUS, -1, -SEARCH_RADIUS),
+                origin.add(SEARCH_RADIUS, 1, SEARCH_RADIUS))) {
             if (blacklist.containsKey(pos)) continue;
+            if (!sameLevel(mc, pos)) continue;
             BlockState s = mc.world.getBlockState(pos);
             Kind k = null;
             if (harvest && isMature(s) && cfg.isSelected(s.getBlock())) {
@@ -539,23 +538,20 @@ public class AutoFarmClient implements ClientModInitializer {
 
     // ------------------------------------------------------------------ yürüme (yol bulma ile)
 
-    /**
-     * Oyuncunun "durduğu kat"ı, ayakların altındaki zemin bloğuna göre hesaplar.
-     * Farmland (tarla toprağı) görsel olarak çukur olduğundan p.getY() doğrudan
-     * kullanılırsa bir alt katmış gibi yanlış hesaplanabiliyordu; bunun yerine
-     * ayağın hemen altındaki dolu bloğu bulup onun bir üstünü "ayak hücresi" sayıyoruz.
-     */
+    /** Oyuncunun ayaklarının bulunduğu blok (bounding box'ın alt sınırı). */
     private static BlockPos feetCell(ClientPlayerEntity p) {
-        BlockPos base = BlockPos.ofFloored(p.getX(), p.getY() + 0.1, p.getZ());
-        ClientWorld w = (ClientWorld) p.getWorld();
-        for (int i = 0; i <= 1; i++) {
-            BlockPos probe = base.down(i);
-            if (!w.getBlockState(probe).getCollisionShape(w, probe).isEmpty()
-                    || !w.getBlockState(probe).getFluidState().isEmpty()) {
-                return probe.up();
-            }
-        }
-        return base;
+        return BlockPos.ofFloored(p.getX(), p.getY(), p.getZ());
+    }
+
+    /**
+     * Bir hedefin, oyuncunun şu an bulunduğu katla "aynı seviye" sayılıp sayılmayacağı.
+     * Farmland/çim gibi bloklarda görsel yükseklik farkı, zıplama veya merdiven/basamak
+     * geçişleri yüzünden tam eşitlik yerine ±1 bloklu bir bant kullanıyoruz:
+     * oyuncunun bastığı katın 1 altı ile 1 üstü arasındaki ekinler "aynı kat" sayılır.
+     */
+    private boolean sameLevel(MinecraftClient mc, BlockPos pos) {
+        int feetY = feetCell(mc.player).getY();
+        return pos.getY() >= feetY - 1 && pos.getY() <= feetY + 1;
     }
 
     private void navigate(MinecraftClient mc, Vec3d goalAim, Kind kind, double radius) {
@@ -718,7 +714,7 @@ public class AutoFarmClient implements ClientModInitializer {
         }
         double hd = Math.hypot(pos.getX() + 0.5 - aim.x, pos.getZ() + 0.5 - aim.z);
         if (kind == Kind.PLANT) {
-            return hd <= radius && pos.getY() == targetPos.getY();
+            return hd <= radius && Math.abs(pos.getY() - targetPos.getY()) <= 1;
         }
         // ITEM
         return hd <= radius && Math.abs(pos.getY() + 0.5 - aim.y) <= 1.6;
