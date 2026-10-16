@@ -512,8 +512,8 @@ public class AutoFarmClient implements ClientModInitializer {
         if (kind == Kind.HARVEST) {
             return new Vec3d(pos.getX() + 0.5, pos.getY() + 0.35, pos.getZ() + 0.5);
         }
-        // ekim: toprağın üst yüzeyi
-        return new Vec3d(pos.getX() + 0.5, pos.getY() - 1 + 0.9, pos.getZ() + 0.5);
+        // ekim: farmland'in gerçek üst yüzeyi (tam blok değil, 15/16 yükseklik)
+        return new Vec3d(pos.getX() + 0.5, pos.getY() - 1 + 0.9375, pos.getZ() + 0.5);
     }
 
     /** Kamerayı hedefe doğru kademeli çevirir. */
@@ -592,7 +592,7 @@ public class AutoFarmClient implements ClientModInitializer {
         double cz = wp.getZ() + 0.5;
         double d = Math.hypot(cx - p.getX(), cz - p.getZ());
 
-        if (d < 0.4 && Math.abs(p.getY() - wp.getY()) < 1.3) {
+        if (d < 0.5 && Math.abs(p.getY() - wp.getY()) < 1.6) {
             pathIdx++;
             if (pathIdx >= path.size()) {
                 path = null;
