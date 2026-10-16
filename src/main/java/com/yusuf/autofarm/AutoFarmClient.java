@@ -47,7 +47,7 @@ import java.util.Set;
 public class AutoFarmClient implements ClientModInitializer {
     private static final int SEARCH_RADIUS = 12;     // hedef arama yarıçapı
     private static final double WALK_STOP = 2.6;     // hedefe bu kadar yaklaşınca dur
-    private static final int AIM_TICKS = 2;          // işlemden önce hedefe sabit bakma süresi
+    private static final int AIM_TICKS = 1;          // işlemden önce hedefe sabit bakma süresi (hızlı tepki)
     private static final int TARGET_TIMEOUT = 140;   // hedefe ulaşamazsa vazgeç (tick)
     private static final int AVOID_DURATION = 18;    // engelden kaçınma süresi (tick)
 
@@ -163,11 +163,13 @@ public class AutoFarmClient implements ClientModInitializer {
     }
 
     private float lookStep() {
-        return 5f + 3f * cfg.speed;           // 8 .. 35 derece/tick
+        // Hız 1 → ~12°, hız 10 → ~90°/tick (neredeyse anında bakış)
+        return 3f + 8.7f * cfg.speed;
     }
 
     private int actionDelay() {
-        return Math.max(1, 11 - cfg.speed);   // 10 .. 1 tick
+        // Hız 1 → 8 tick, hız 5 → 3 tick, hız 8+ → 0 (ardışık işlem, bekleme yok)
+        return Math.max(0, 9 - cfg.speed);
     }
 
     // ------------------------------------------------------------------ ana döngü
