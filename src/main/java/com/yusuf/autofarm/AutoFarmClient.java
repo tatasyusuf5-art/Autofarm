@@ -7,10 +7,13 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallba
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.CropBlock;
 import net.minecraft.block.NetherWartBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.util.InputUtil;
+import net.minecraft.client.world.ClientWorld;
 import net.minecraft.component.type.ItemEnchantmentsComponent;
 import net.minecraft.enchantment.Enchantment;
 import net.minecraft.enchantment.Enchantments;
@@ -33,23 +36,31 @@ import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import org.lwjgl.glfw.GLFW;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.Set;
 
 /**
- * Legit yardımcı otomasyon: hedefe yürür, bloğa bakar (kamera görünür şekilde döner),
+ * Legit yardımcı otomasyon: güvenli yol bulup hedefe yürür, bloğa bakar (kamera görünür şekilde döner),
  * gerçek bakış ışınıyla (raycast) vurduğu bloğu kırar / eker.
  *
  * Tuşlar: G = aç/kapat, R + G = ayar menüsü.
  */
 public class AutoFarmClient implements ClientModInitializer {
     private static final int SEARCH_RADIUS = 12;     // hedef arama yarıçapı
-    private static final double WALK_STOP = 2.6;     // hedefe bu kadar yaklaşınca dur
-    private static final int AIM_TICKS = 1;          // işlemden önce hedefe sabit bakma süresi (hızlı tepki)
-    private static final int TARGET_TIMEOUT = 140;   // hedefe ulaşamazsa vazgeç (tick)
-    private static final int AVOID_DURATION = 18;    // engelden kaçınma süresi (tick)
+    private static final double WALK_STOP = 3.0;     // kırma için hedefe bu kadar yaklaşınca dur
+    private static final double PLANT_STRICT = 0.3;  // ekmek için hedef hücrenin üstüne kadar yaklaş
+    private static final double PLANT_RELAXED = 0.9; // oraya gidilemezse biraz daha uzaktan dene
+    private static final int AIM_TICKS = 1;          // işlemden önce hedefe sabit bakma süresi
+    private static final int TARGET_TIMEOUT = 400;   // hedefe ulaşamazsa vazgeç (tick)
+    private static final int MAX_EXPANSIONS = 3000;  // yol bulma sınırı
+    private static final int PATH_RANGE = 24;
 
     private enum Kind { HARVEST, PLANT, ITEM }
 
@@ -59,30 +70,30 @@ public class AutoFarmClient implements ClientModInitializer {
             "3: Kır + Ek (kırar ve geri eker)"
     };
 
+    private static final int[][] DIRS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
     private final AutoFarmConfig cfg = AutoFarmConfig.get();
 
     private boolean enabled = false;
     private boolean openGui = false;
+    private boolean prevG = false;
+    private boolean announce = true;
 
     private BlockPos targetPos;
     private Kind targetKind;
     private ItemEntity targetItem;
     private int targetTicks, aimedTicks, actionCooldown, tickCounter, warnCooldown;
-    private boolean fwdHeld, jumpHeld, leftHeld, rightHeld;
+    private boolean keysHeld;
 
-    /** Engelden kaçınma: -1 sol, +1 sağ, 0 yok */
-    private int avoidDir = 0;
-    private int avoidTicks = 0;
-    private int stuckTicks = 0;
-    private Vec3d lastPos = null;
+    // yol takibi
+    private List<BlockPos> path;
+    private int pathIdx;
+    private int replans;
+    private double approach = PLANT_STRICT;
 
     private final Map<BlockPos, Integer> blacklist = new HashMap<>();
     private final Map<BlockPos, Integer> replant = new HashMap<>();
     private final Set<Integer> ignoredItems = new HashSet<>();
-
-    private boolean prevG = false;
-    private boolean prevR = false;
-    private boolean announce = true;
 
     @Override
     public void onInitializeClient() {
@@ -99,7 +110,7 @@ public class AutoFarmClient implements ClientModInitializer {
                         })
                         .then(ClientCommandManager.literal("gui")
                                 .executes(ctx -> {
-                                    openGui = true;
+                                    openGui = true;   // sohbet kapandıktan sonra bir sonraki tickte açılır
                                     return 1;
                                 }))
                         .then(ClientCommandManager.literal("mode")
@@ -142,10 +153,6 @@ public class AutoFarmClient implements ClientModInitializer {
         blacklist.clear();
         replant.clear();
         ignoredItems.clear();
-        avoidDir = 0;
-        avoidTicks = 0;
-        stuckTicks = 0;
-        lastPos = null;
         releaseKeys(mc);
     }
 
@@ -162,14 +169,13 @@ public class AutoFarmClient implements ClientModInitializer {
         }
     }
 
+    // Hız ayarı (1..10): bakış dönüş hızı ve işlemler arası bekleme
     private float lookStep() {
-        // Hız 1 → ~12°, hız 10 → ~90°/tick (neredeyse anında bakış)
-        return 3f + 8.7f * cfg.speed;
+        return 20f + 7f * cfg.speed;          // 27 .. 90 derece/tick
     }
 
     private int actionDelay() {
-        // Hız 1 → 8 tick, hız 5 → 3 tick, hız 8+ → 0 (ardışık işlem, bekleme yok)
-        return Math.max(0, 9 - cfg.speed);
+        return cfg.speed >= 10 ? 0 : Math.max(1, 6 - cfg.speed / 2);   // hız 10'da bekleme yok
     }
 
     // ------------------------------------------------------------------ ana döngü
@@ -183,12 +189,13 @@ public class AutoFarmClient implements ClientModInitializer {
                     "[AutoFarm] Yüklendi. G = aç/kapat, R + G = menü, ya da /autofarm gui"), false);
         }
 
+        // Tuşlar doğrudan klavyeden okunur (başka modlarla tuş çakışmasından etkilenmez)
         boolean g = false;
         boolean r = false;
         if (mc.currentScreen == null && mc.player != null) {
             long window = mc.getWindow().getHandle();
-            g = org.lwjgl.glfw.GLFW.glfwGetKey(window, GLFW.GLFW_KEY_G) == GLFW.GLFW_PRESS;
-            r = org.lwjgl.glfw.GLFW.glfwGetKey(window, GLFW.GLFW_KEY_R) == GLFW.GLFW_PRESS;
+            g = InputUtil.isKeyPressed(window, GLFW.GLFW_KEY_G);
+            r = InputUtil.isKeyPressed(window, GLFW.GLFW_KEY_R);
         }
         if (g && !prevG) {
             if (r) {
@@ -198,7 +205,6 @@ public class AutoFarmClient implements ClientModInitializer {
             }
         }
         prevG = g;
-        prevR = r;
 
         if (openGui && mc.player != null && mc.currentScreen == null) {
             openGui = false;
@@ -211,7 +217,7 @@ public class AutoFarmClient implements ClientModInitializer {
         if (actionCooldown > 0) actionCooldown--;
 
         if (!enabled || mc.player == null || mc.world == null || mc.interactionManager == null
-                || mc.currentScreen != null || mc.player.isDead()) {
+                || mc.currentScreen != null || mc.player.isSpectator()) {
             releaseKeys(mc);
             return;
         }
@@ -225,6 +231,7 @@ public class AutoFarmClient implements ClientModInitializer {
         boolean harvestMode = cfg.mode == 0 || cfg.mode == 2;
         boolean plantMode = cfg.mode == 1 || cfg.mode == 2;
 
+        // Alet zorunlulukları (kırma modlarında ana el)
         if (harvestMode) {
             ItemStack tool = mc.player.getMainHandStack();
             if (cfg.requireHoe && !tool.isIn(ItemTags.HOES)) {
@@ -239,10 +246,11 @@ public class AutoFarmClient implements ClientModInitializer {
             }
         }
 
+        // Ekim için elde seçili ekin
         Hand plantHand = null;
         Block plantBlock = null;
         if (plantMode) {
-            plantHand = findPlantHand(mc, cfg.mode == 1);
+            plantHand = findPlantHand(mc, cfg.mode == 1);   // Mod 2: ana/2. el, Mod 3: sadece 2. el
             if (plantHand == null) {
                 supply(mc);
                 releaseKeys(mc);
@@ -251,6 +259,7 @@ public class AutoFarmClient implements ClientModInitializer {
             plantBlock = ((BlockItem) mc.player.getStackInHand(plantHand).getItem()).getBlock();
         }
 
+        // Hedef geçerli mi?
         if (targetKind != null && !targetStillValid(mc, plantBlock)) {
             clearTarget();
         }
@@ -267,80 +276,87 @@ public class AutoFarmClient implements ClientModInitializer {
             return;
         }
 
-        step(mc, plantHand);
+        step(mc, plantHand, plantBlock);
     }
 
-    private void step(MinecraftClient mc, Hand plantHand) {
+    private void step(MinecraftClient mc, Hand plantHand, Block plantBlock) {
         ClientPlayerEntity p = mc.player;
-
-        // Takılma tespiti
-        Vec3d now = p.getPos();
-        if (lastPos != null) {
-            double moved = Math.hypot(now.x - lastPos.x, now.z - lastPos.z);
-            if (moved < 0.05 && (fwdHeld || leftHeld || rightHeld)) {
-                stuckTicks++;
-            } else {
-                stuckTicks = 0;
-            }
-        }
-        lastPos = now;
 
         // Yerdeki eşyaları topla
         if (targetKind == Kind.ITEM) {
             Vec3d ip = targetItem.getPos();
-            float err = lookAt(p, ip.add(0, 0.1, 0));
+            lookAt(p, ip.add(0, 0.1, 0));
             double hd = Math.hypot(ip.x - p.getX(), ip.z - p.getZ());
-            if (hd > 0.6) {
-                if (isDangerous(mc, true)) {
-                    startAvoid(mc);
-                }
-                navigate(mc, err < 45f);
+            if (hd <= 0.6) {
+                releaseKeys(mc);
             } else {
-                stopMove(mc);
+                navigate(mc, ip, Kind.ITEM, 0.6);
             }
             return;
         }
 
         Vec3d aim = aimPoint(targetPos, targetKind);
-        float yawErr = lookAt(p, aim);
-        double dist = p.getEyePos().distanceTo(aim);
+        lookAt(p, aim);
 
-        if (dist > WALK_STOP) {
-            aimedTicks = 0;
-            if (isDangerous(mc, true) || stuckTicks > 8 || p.horizontalCollision) {
-                startAvoid(mc);
-            }
-            navigate(mc, yawErr < 45f);
-            return;
-        }
-
-        stopMove(mc);
+        double eyeDist = p.getEyePos().distanceTo(aim);
+        double hd = Math.hypot(p.getX() - aim.x, p.getZ() - aim.z);
+        boolean inReach = eyeDist <= WALK_STOP;
+        boolean standOk = (targetKind == Kind.HARVEST) ? inReach : (hd <= approach);
 
         // Gerçek bakış ışını hedefi gösteriyor mu?
-        HitResult hr = p.raycast(p.getBlockInteractionRange(), 1.0f, false);
         BlockHitResult bhr = null;
         boolean ok = false;
-        if (hr instanceof BlockHitResult b && b.getType() == HitResult.Type.BLOCK) {
-            bhr = b;
-            if (targetKind == Kind.HARVEST) {
-                ok = b.getBlockPos().equals(targetPos);
-            } else {
-                ok = b.getBlockPos().equals(targetPos.down())
-                        && b.getSide() == Direction.UP;
+        if (inReach) {
+            HitResult hr = p.raycast(p.getBlockInteractionRange(), 1.0f, false);
+            if (hr instanceof BlockHitResult b && b.getType() == HitResult.Type.BLOCK) {
+                bhr = b;
+                if (targetKind == Kind.HARVEST) {
+                    ok = b.getBlockPos().equals(targetPos);
+                } else {
+                    ok = b.getBlockPos().equals(targetPos.down()) && b.getSide() == Direction.UP;
+                }
+                // Araya başka bir ekin girdiyse, ışının gösterdiği geçerli hedefi kullan
+                if (!ok) {
+                    BlockPos hp = b.getBlockPos();
+                    BlockPos feet = feetCell(p);
+                    boolean sameLevel = hp.getY() == feet.getY();
+                    BlockState hs = mc.world.getBlockState(hp);
+                    boolean harvestMode = cfg.mode == 0 || cfg.mode == 2;
+                    if (sameLevel && harvestMode && isMature(hs) && cfg.isSelected(hs.getBlock())
+                            && !blacklist.containsKey(hp)) {
+                        targetPos = hp.toImmutable();
+                        targetKind = Kind.HARVEST;
+                        ok = true;
+                    } else if (plantBlock != null && b.getSide() == Direction.UP) {
+                        BlockPos above = hp.up();
+                        if (above.getY() == feet.getY()
+                                && mc.world.getBlockState(above).isAir()
+                                && (cfg.mode == 1 || replant.containsKey(above))
+                                && plantBlock.getDefaultState().canPlaceAt(mc.world, above)) {
+                            targetPos = above.toImmutable();
+                            targetKind = Kind.PLANT;
+                            ok = true;
+                        }
+                    }
+                }
             }
         }
 
-        if (!ok) {
+        if (!ok && !standOk) {
             aimedTicks = 0;
-            if (targetKind == Kind.PLANT || targetKind == Kind.HARVEST) {
-                if (avoidTicks <= 0) {
-                    startAvoid(mc);
-                }
-                navigate(mc, false);
+            if (targetKind == Kind.HARVEST) {
+                navigate(mc, aim, Kind.HARVEST, WALK_STOP);
+            } else {
+                navigate(mc, aim, Kind.PLANT, approach);
             }
             return;
         }
 
+        releaseKeys(mc);
+        if (!ok) {
+            aimedTicks = 0;
+            return;
+        }
         if (++aimedTicks < AIM_TICKS || actionCooldown > 0) return;
 
         if (targetKind == Kind.HARVEST) {
@@ -355,13 +371,10 @@ public class AutoFarmClient implements ClientModInitializer {
                 p.swingHand(plantHand);
                 replant.remove(targetPos);
             } else {
-                blacklist.put(targetPos.toImmutable(), tickCounter + 160);
+                blacklist.put(targetPos.toImmutable(), tickCounter + 200);
             }
         }
         actionCooldown = actionDelay();
-        avoidDir = 0;
-        avoidTicks = 0;
-        stuckTicks = 0;
         clearTarget();
     }
 
@@ -408,8 +421,8 @@ public class AutoFarmClient implements ClientModInitializer {
         Kind bestKind = null;
 
         for (BlockPos pos : BlockPos.iterate(
-                origin.add(-SEARCH_RADIUS, -2, -SEARCH_RADIUS),
-                origin.add(SEARCH_RADIUS, 2, SEARCH_RADIUS))) {
+                origin.add(-SEARCH_RADIUS, 0, -SEARCH_RADIUS),
+                origin.add(SEARCH_RADIUS, 0, SEARCH_RADIUS))) {
             if (blacklist.containsKey(pos)) continue;
             BlockState s = mc.world.getBlockState(pos);
             Kind k = null;
@@ -437,6 +450,7 @@ public class AutoFarmClient implements ClientModInitializer {
             return;
         }
 
+        // Blok hedefi yoksa yere düşen ekinleri topla
         if (harvest) {
             Box box = p.getBoundingBox().expand(10, 3, 10);
             ItemEntity bestItem = null;
@@ -477,6 +491,10 @@ public class AutoFarmClient implements ClientModInitializer {
         targetItem = null;
         targetTicks = 0;
         aimedTicks = 0;
+        path = null;
+        pathIdx = 0;
+        replans = 0;
+        approach = PLANT_STRICT;
     }
 
     private void giveUp() {
@@ -485,22 +503,21 @@ public class AutoFarmClient implements ClientModInitializer {
         } else if (targetPos != null) {
             blacklist.put(targetPos.toImmutable(), tickCounter + 600);
         }
-        avoidDir = 0;
-        avoidTicks = 0;
-        stuckTicks = 0;
         clearTarget();
     }
 
-    // ------------------------------------------------------------------ bakış & hareket
+    // ------------------------------------------------------------------ bakış
 
     private static Vec3d aimPoint(BlockPos pos, Kind kind) {
         if (kind == Kind.HARVEST) {
-            return new Vec3d(pos.getX() + 0.5, pos.getY() + 0.25, pos.getZ() + 0.5);
+            return new Vec3d(pos.getX() + 0.5, pos.getY() + 0.35, pos.getZ() + 0.5);
         }
-        return new Vec3d(pos.getX() + 0.5, pos.getY() - 1 + 0.85, pos.getZ() + 0.5);
+        // ekim: toprağın üst yüzeyi
+        return new Vec3d(pos.getX() + 0.5, pos.getY() - 1 + 0.9, pos.getZ() + 0.5);
     }
 
-    private float lookAt(ClientPlayerEntity p, Vec3d target) {
+    /** Kamerayı hedefe doğru kademeli çevirir. */
+    private void lookAt(ClientPlayerEntity p, Vec3d target) {
         float step = lookStep();
         Vec3d eye = p.getEyePos();
         double dx = target.x - eye.x;
@@ -508,7 +525,9 @@ public class AutoFarmClient implements ClientModInitializer {
         double dz = target.z - eye.z;
         double h = Math.sqrt(dx * dx + dz * dz);
 
-        float wantYaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
+        float wantYaw = (h < 0.5)
+                ? p.getYaw()   // tam üstündeyken yaw titremesin
+                : (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
         float wantPitch = (float) (-Math.toDegrees(Math.atan2(dy, h)));
 
         float yawDiff = MathHelper.wrapDegrees(wantYaw - p.getYaw());
@@ -516,153 +535,232 @@ public class AutoFarmClient implements ClientModInitializer {
 
         p.setYaw(p.getYaw() + MathHelper.clamp(yawDiff, -step, step));
         p.setPitch(MathHelper.clamp(p.getPitch() + MathHelper.clamp(pitchDiff, -step, step), -90f, 90f));
-
-        return Math.abs(yawDiff) > step ? Math.abs(yawDiff) - step : 0f;
     }
 
-    private void navigate(MinecraftClient mc, boolean wantForward) {
+    // ------------------------------------------------------------------ yürüme (yol bulma ile)
+
+    private static BlockPos feetCell(ClientPlayerEntity p) {
+        // çiftlik toprağı gibi yarım bloklarda ayaklar bir üst hücrede sayılsın
+        return BlockPos.ofFloored(p.getX(), p.getY() + 0.2, p.getZ());
+    }
+
+    private void navigate(MinecraftClient mc, Vec3d goalAim, Kind kind, double radius) {
         ClientPlayerEntity p = mc.player;
 
-        if (avoidTicks > 0) {
-            avoidTicks--;
-            setMove(mc, true, avoidDir < 0, avoidDir > 0);
-            boolean jump = p.horizontalCollision && p.isOnGround();
-            mc.options.jumpKey.setPressed(jump);
-            jumpHeld = jump;
-            if (avoidTicks == 0) {
-                avoidDir = 0;
+        if (path == null) {
+            List<BlockPos> found = findPath(mc, goalAim, kind, radius);
+            if (found == null && kind == Kind.PLANT && radius < PLANT_RELAXED) {
+                approach = PLANT_RELAXED;
+                found = findPath(mc, goalAim, kind, PLANT_RELAXED);
             }
+            if (found == null) {
+                releaseKeys(mc);
+                giveUp();      // güvenli yol yok: bu hedefi bırak
+                return;
+            }
+            path = found;
+            pathIdx = found.size() > 1 ? 1 : 0;
+            if (++replans > 4) {
+                releaseKeys(mc);
+                giveUp();
+                return;
+            }
+        }
+
+        if (pathIdx >= path.size()) {
+            path = null;   // varış noktasına geldik ama hâlâ uzak: yeniden planla
+            releaseKeys(mc);
             return;
         }
 
-        setMove(mc, wantForward, false, false);
-        boolean jump = wantForward && p.horizontalCollision && p.isOnGround();
-        mc.options.jumpKey.setPressed(jump);
-        jumpHeld = jump;
-    }
+        BlockPos wp = path.get(pathIdx);
+        double cx = wp.getX() + 0.5;
+        double cz = wp.getZ() + 0.5;
+        double d = Math.hypot(cx - p.getX(), cz - p.getZ());
 
-    private void stopMove(MinecraftClient mc) {
-        setMove(mc, false, false, false);
-        if (jumpHeld) {
-            mc.options.jumpKey.setPressed(false);
-            jumpHeld = false;
+        if (d < 0.4 && Math.abs(p.getY() - wp.getY()) < 1.3) {
+            pathIdx++;
+            if (pathIdx >= path.size()) {
+                path = null;
+                releaseKeys(mc);
+                return;
+            }
+            wp = path.get(pathIdx);
+            cx = wp.getX() + 0.5;
+            cz = wp.getZ() + 0.5;
+        } else if (d > 3.5) {
+            path = null;   // yoldan çıktık
+            releaseKeys(mc);
+            return;
         }
+
+        boolean jump = p.isOnGround() && wp.getY() > feetCell(p).getY();
+        moveToward(mc, cx, cz, jump);
     }
 
-    private void setMove(MinecraftClient mc, boolean fwd, boolean left, boolean right) {
-        mc.options.forwardKey.setPressed(fwd);
-        mc.options.leftKey.setPressed(left);
-        mc.options.rightKey.setPressed(right);
-        fwdHeld = fwd;
-        leftHeld = left;
-        rightHeld = right;
+    /** Kamera hedefe bakarken, yürüme tuşlarını hareket yönüne göre seçer (ileri/geri/yan). */
+    private void moveToward(MinecraftClient mc, double tx, double tz, boolean jump) {
+        ClientPlayerEntity p = mc.player;
+        double dx = tx - p.getX();
+        double dz = tz - p.getZ();
+        float moveYaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
+        float rel = MathHelper.wrapDegrees(moveYaw - p.getYaw());
+
+        boolean f = Math.abs(rel) < 67.5f;
+        boolean b = Math.abs(rel) > 112.5f;
+        boolean r = rel > 22.5f && rel < 157.5f;
+        boolean l = rel < -22.5f && rel > -157.5f;
+        setKeys(mc, f, b, l, r, jump);
+    }
+
+    private void setKeys(MinecraftClient mc, boolean f, boolean b, boolean l, boolean r, boolean j) {
+        mc.options.forwardKey.setPressed(f);
+        mc.options.backKey.setPressed(b);
+        mc.options.leftKey.setPressed(l);
+        mc.options.rightKey.setPressed(r);
+        mc.options.jumpKey.setPressed(j);
+        keysHeld = f || b || l || r || j;
     }
 
     private void releaseKeys(MinecraftClient mc) {
-        if (fwdHeld || leftHeld || rightHeld || jumpHeld) {
-            mc.options.forwardKey.setPressed(false);
-            mc.options.leftKey.setPressed(false);
-            mc.options.rightKey.setPressed(false);
-            mc.options.jumpKey.setPressed(false);
-            fwdHeld = leftHeld = rightHeld = jumpHeld = false;
+        if (keysHeld) {
+            setKeys(mc, false, false, false, false, false);
         }
     }
 
-    private void startAvoid(MinecraftClient mc) {
-        if (avoidTicks > 0) return;
-        int preferred = chooseSaferSide(mc);
-        avoidDir = preferred != 0 ? preferred : (tickCounter % 2 == 0 ? 1 : -1);
-        avoidTicks = AVOID_DURATION;
-        stuckTicks = 0;
-    }
+    // ------------------------------------------------------------------ A* yol bulma
 
-    private int chooseSaferSide(MinecraftClient mc) {
-        ClientPlayerEntity p = mc.player;
-        Vec3d eye = p.getEyePos();
-        Vec3d toTarget;
-        if (targetKind == Kind.ITEM && targetItem != null) {
-            toTarget = targetItem.getPos().subtract(eye);
-        } else if (targetPos != null) {
-            toTarget = Vec3d.ofCenter(targetPos).subtract(eye);
-        } else {
-            return 0;
+    private static class Node {
+        final BlockPos pos;
+        Node parent;
+        double g, f;
+
+        Node(BlockPos pos) {
+            this.pos = pos;
         }
-        double len = Math.hypot(toTarget.x, toTarget.z);
-        if (len < 1e-4) return 0;
-        double rx = -toTarget.z / len;
-        double rz = toTarget.x / len;
-
-        int leftScore = sideScore(mc, eye, -rx, -rz);
-        int rightScore = sideScore(mc, eye, rx, rz);
-        if (leftScore > rightScore) return -1;
-        if (rightScore > leftScore) return 1;
-        return 0;
     }
 
-    private int sideScore(MinecraftClient mc, Vec3d from, double dx, double dz) {
-        int score = 0;
-        for (int step = 1; step <= 3; step++) {
-            BlockPos pos = BlockPos.ofFloored(from.add(dx * step, 0, dz * step));
-            BlockState ground = mc.world.getBlockState(pos.down());
-            BlockState feet = mc.world.getBlockState(pos);
-            BlockState head = mc.world.getBlockState(pos.up());
+    private List<BlockPos> findPath(MinecraftClient mc, Vec3d aim, Kind kind, double radius) {
+        ClientWorld w = mc.world;
+        BlockPos start = feetCell(mc.player);
 
-            if (isFluidDanger(feet) || isFluidDanger(head) || isFluidDanger(ground)) {
-                score -= 5;
-                continue;
-            }
-            if (ground.getCollisionShape(mc.world, pos.down()).isEmpty()
-                    && ground.getFluidState().isEmpty()) {
-                score -= 4;
-                continue;
-            }
-            if (isSolidObstacle(feet, mc, pos) || isSolidObstacle(head, mc, pos.up())) {
-                score -= 3;
-                continue;
-            }
-            score += 2;
-        }
-        return score;
-    }
+        PriorityQueue<Node> open = new PriorityQueue<>(Comparator.comparingDouble((Node n) -> n.f));
+        Map<BlockPos, Node> best = new HashMap<>();
+        Set<BlockPos> closed = new HashSet<>();
 
-    private static boolean isFluidDanger(BlockState s) {
-        return s.getFluidState().isIn(FluidTags.LAVA)
-                || s.getFluidState().isIn(FluidTags.WATER);
-    }
+        Node s = new Node(start);
+        s.g = 0;
+        s.f = heuristic(start, aim);
+        open.add(s);
+        best.put(start, s);
 
-    private static boolean isSolidObstacle(BlockState s, MinecraftClient mc, BlockPos pos) {
-        if (s.isAir()) return false;
-        Block b = s.getBlock();
-        if (b instanceof CropBlock || b instanceof NetherWartBlock) return false;
-        return !s.getCollisionShape(mc.world, pos).isEmpty();
-    }
+        int expansions = 0;
+        while (!open.isEmpty() && expansions < MAX_EXPANSIONS) {
+            Node cur = open.poll();
+            if (!closed.add(cur.pos)) continue;
+            expansions++;
 
-    private boolean isDangerous(MinecraftClient mc, boolean checkBody) {
-        ClientPlayerEntity p = mc.player;
-        Vec3d dir = Vec3d.fromPolar(0, p.getYaw());
-        Vec3d base = p.getPos();
-
-        for (int i = 1; i <= 3; i++) {
-            Vec3d probe = base.add(dir.multiply(i));
-            BlockPos pos = BlockPos.ofFloored(probe);
-            BlockState ground = mc.world.getBlockState(pos.down());
-            BlockState feet = mc.world.getBlockState(pos);
-            BlockState head = mc.world.getBlockState(pos.up());
-
-            if (isFluidDanger(feet) || isFluidDanger(head) || isFluidDanger(ground)) return true;
-
-            if (ground.getCollisionShape(mc.world, pos.down()).isEmpty()
-                    && ground.getFluidState().isEmpty()) {
-                return true;
+            if (isGoal(cur.pos, aim, kind, radius)) {
+                List<BlockPos> out = new ArrayList<>();
+                for (Node n = cur; n != null; n = n.parent) out.add(n.pos);
+                Collections.reverse(out);
+                return out;
             }
 
-            if (checkBody) {
-                if (isSolidObstacle(feet, mc, pos) || isSolidObstacle(head, mc, pos.up())) {
-                    return true;
+            for (int[] d : DIRS) {
+                for (int dy = 1; dy >= 0; dy--) {
+                    BlockPos n = cur.pos.add(d[0], dy, d[1]);
+                    if (closed.contains(n)) continue;
+                    if (Math.abs(n.getX() - start.getX()) > PATH_RANGE
+                            || Math.abs(n.getZ() - start.getZ()) > PATH_RANGE
+                            || Math.abs(n.getY() - start.getY()) > 8) continue;
+                    if (!canMove(w, cur.pos, n, dy)) continue;
+
+                    double cost = 1.0 + (dy > 0 ? 1.5 : 0.0) + (dy < 0 ? 1.0 : 0.0) + riskCost(w, n);
+                    double g = cur.g + cost;
+                    Node ex = best.get(n);
+                    if (ex == null || g < ex.g) {
+                        Node nn = new Node(n);
+                        nn.parent = cur;
+                        nn.g = g;
+                        nn.f = g + heuristic(n, aim);
+                        best.put(n, nn);
+                        open.add(nn);
+                    }
                 }
             }
         }
-        return false;
+        return null;
+    }
+
+    private static double heuristic(BlockPos pos, Vec3d aim) {
+        return Math.hypot(pos.getX() + 0.5 - aim.x, pos.getZ() + 0.5 - aim.z);
+    }
+
+    private boolean isGoal(BlockPos pos, Vec3d aim, Kind kind, double radius) {
+        if (kind == Kind.HARVEST) {
+            Vec3d eye = new Vec3d(pos.getX() + 0.5, pos.getY() + 1.62, pos.getZ() + 0.5);
+            return eye.distanceTo(aim) <= WALK_STOP;
+        }
+        double hd = Math.hypot(pos.getX() + 0.5 - aim.x, pos.getZ() + 0.5 - aim.z);
+        if (kind == Kind.PLANT) {
+            return hd <= radius && pos.getY() == targetPos.getY();
+        }
+        // ITEM
+        return hd <= radius && Math.abs(pos.getY() + 0.5 - aim.y) <= 1.6;
+    }
+
+    private boolean canMove(ClientWorld w, BlockPos c, BlockPos n, int dy) {
+        // Aşağı adım yok: farm katlarından düşüp altındaki tarlayı ezmeyelim.
+        if (dy == 0) {
+            return canStand(w, n);
+        }
+        // zıplayarak bir blok yukarı: üst hücrede boşluk gerekir
+        return canStand(w, n) && passable(w, c.up(2));
+    }
+
+    /** Ayaklar ve kafa hücresi boş, altı sağlam ve güvenli mi? */
+    private boolean canStand(ClientWorld w, BlockPos p) {
+        if (!passable(w, p) || !passable(w, p.up())) return false;
+        BlockPos fp = p.down();
+        BlockState floor = w.getBlockState(fp);
+        if (floor.getCollisionShape(w, fp).isEmpty()) return false;
+        if (!floor.getFluidState().isEmpty()) return false;
+        return !isHazard(floor.getBlock());
+    }
+
+    /** Su/lav yok, çarpışma yok (zincir, fener, çit...), tehlikeli blok yok. */
+    private boolean passable(ClientWorld w, BlockPos pos) {
+        BlockState s = w.getBlockState(pos);
+        if (!s.getCollisionShape(w, pos).isEmpty()) return false;
+        if (!s.getFluidState().isEmpty()) return false;
+        return !isHazard(s.getBlock());
+    }
+
+    private static boolean isHazard(Block b) {
+        return b == Blocks.FIRE || b == Blocks.SOUL_FIRE || b == Blocks.CACTUS
+                || b == Blocks.SWEET_BERRY_BUSH || b == Blocks.COBWEB || b == Blocks.POWDER_SNOW
+                || b == Blocks.MAGMA_BLOCK || b == Blocks.CAMPFIRE || b == Blocks.SOUL_CAMPFIRE
+                || b == Blocks.WITHER_ROSE;
+    }
+
+    /** Su, lav ve uçurum kenarına yakın hücrelere ceza: en güvenli yol seçilsin. */
+    private double riskCost(ClientWorld w, BlockPos n) {
+        double cost = 0;
+        for (int[] d : DIRS) {
+            BlockPos q = n.add(d[0], 0, d[1]);
+            if (!w.getFluidState(q).isEmpty()) {
+                cost += w.getFluidState(q).isIn(FluidTags.LAVA) ? 8 : 2;
+            }
+            if (!w.getFluidState(q.down()).isEmpty()) {
+                cost += w.getFluidState(q.down()).isIn(FluidTags.LAVA) ? 8 : 2;
+            }
+            if (w.getBlockState(q.down()).getCollisionShape(w, q.down()).isEmpty()
+                    && w.getBlockState(q.down(2)).getCollisionShape(w, q.down(2)).isEmpty()) {
+                cost += 1.5;   // uçurum kenarı
+            }
+        }
+        return cost;
     }
 
     // ------------------------------------------------------------------ yardımcılar
