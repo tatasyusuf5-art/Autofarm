@@ -539,9 +539,23 @@ public class AutoFarmClient implements ClientModInitializer {
 
     // ------------------------------------------------------------------ yürüme (yol bulma ile)
 
+    /**
+     * Oyuncunun "durduğu kat"ı, ayakların altındaki zemin bloğuna göre hesaplar.
+     * Farmland (tarla toprağı) görsel olarak çukur olduğundan p.getY() doğrudan
+     * kullanılırsa bir alt katmış gibi yanlış hesaplanabiliyordu; bunun yerine
+     * ayağın hemen altındaki dolu bloğu bulup onun bir üstünü "ayak hücresi" sayıyoruz.
+     */
     private static BlockPos feetCell(ClientPlayerEntity p) {
-        // çiftlik toprağı gibi yarım bloklarda ayaklar bir üst hücrede sayılsın
-        return BlockPos.ofFloored(p.getX(), p.getY() + 0.2, p.getZ());
+        BlockPos base = BlockPos.ofFloored(p.getX(), p.getY() + 0.1, p.getZ());
+        ClientWorld w = (ClientWorld) p.getWorld();
+        for (int i = 0; i <= 1; i++) {
+            BlockPos probe = base.down(i);
+            if (!w.getBlockState(probe).getCollisionShape(w, probe).isEmpty()
+                    || !w.getBlockState(probe).getFluidState().isEmpty()) {
+                return probe.up();
+            }
+        }
+        return base;
     }
 
     private void navigate(MinecraftClient mc, Vec3d goalAim, Kind kind, double radius) {
