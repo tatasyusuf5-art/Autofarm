@@ -100,17 +100,17 @@ public class AutoFarmScreen extends Screen {
 
     private static class SpeedSlider extends SliderWidget {
         SpeedSlider(int x, int y, int w, int h) {
-            super(x, y, w, h, Text.empty(), (AutoFarmConfig.get().speed - 1) / 9.0);
+            super(x, y, w, h, Text.empty(), (AutoFarmConfig.get().speed - 1) / 14.0);
             updateMessage();
         }
 
         private int speedValue() {
-            return 1 + (int) Math.round(this.value * 9);
+            return 1 + (int) Math.round(this.value * 14);
         }
 
         @Override
         protected void updateMessage() {
-            setMessage(Text.literal("Hız: " + speedValue() + " / 10"));
+            setMessage(Text.literal("Hız: " + speedValue() + " / 15"));
         }
 
         @Override
