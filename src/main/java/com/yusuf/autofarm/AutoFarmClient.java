@@ -123,11 +123,11 @@ public class AutoFarmClient implements ClientModInitializer {
                                             return 1;
                                         })))
                         .then(ClientCommandManager.literal("speed")
-                                .then(ClientCommandManager.argument("n", IntegerArgumentType.integer(1, 10))
+                                .then(ClientCommandManager.argument("n", IntegerArgumentType.integer(1, 15))
                                         .executes(ctx -> {
                                             cfg.speed = IntegerArgumentType.getInteger(ctx, "n");
                                             cfg.save();
-                                            say(MinecraftClient.getInstance(), "Hız -> " + cfg.speed + "/10");
+                                            say(MinecraftClient.getInstance(), "Hız -> " + cfg.speed + "/15");
                                             return 1;
                                         })))));
     }
@@ -171,11 +171,11 @@ public class AutoFarmClient implements ClientModInitializer {
 
     // Hız ayarı (1..10): bakış dönüş hızı ve işlemler arası bekleme
     private float lookStep() {
-        return 20f + 7f * cfg.speed;          // 27 .. 90 derece/tick
+        return 9f * cfg.speed;   // 10 -> 90 (eski 10 ile birebir aynı), 15 -> 135 (+%50)
     }
 
     private int actionDelay() {
-        return cfg.speed >= 10 ? 0 : Math.max(1, 6 - cfg.speed / 2);   // hız 10'da bekleme yok
+        return cfg.speed >= 10 ? 0 : Math.max(1, 6 - cfg.speed / 2);   // hız 10 ve üstünde bekleme yok
     }
 
     // ------------------------------------------------------------------ ana döngü
