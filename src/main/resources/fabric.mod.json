@@ -11,7 +11,6 @@
     "client": ["com.yusuf.autofarm.AutoFarmClient"]
   },
   "depends": {
-    "fabricloader": "<=0.16.99",
     "minecraft": "1.21.4",
     "java": ">=21",
     "fabric-api": "*"
