@@ -1,5 +1,5 @@
 {
-  "key.autofarm.toggle": "AutoFarm Aç/Kapat",
-  "key.autofarm.mode": "AutoFarm Mod Değiştir",
+  "key.autofarm.toggle": "AutoFarm Aç/Kapat (G)",
+  "key.autofarm.guimod": "GUI için basılı tut (R + G)",
   "category.autofarm": "AutoFarm"
 }
