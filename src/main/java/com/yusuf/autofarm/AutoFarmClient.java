@@ -5,14 +5,12 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.CropBlock;
 import net.minecraft.block.NetherWartBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.component.type.ItemEnchantmentsComponent;
 import net.minecraft.enchantment.Enchantment;
@@ -76,17 +74,13 @@ public class AutoFarmClient implements ClientModInitializer {
     private final Map<BlockPos, Integer> replant = new HashMap<>();
     private final Set<Integer> ignoredItems = new HashSet<>();
 
-    private KeyBinding toggleKey;
-    private KeyBinding guiModKey;
+    private boolean prevG = false;
+    private boolean prevR = false;
+    private boolean announce = true;
 
     @Override
     public void onInitializeClient() {
         cfg.load();
-
-        toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.autofarm.toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_G, "category.autofarm"));
-        guiModKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.autofarm.guimod", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_R, "category.autofarm"));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
 
@@ -130,7 +124,11 @@ public class AutoFarmClient implements ClientModInitializer {
     public void toggle(MinecraftClient mc) {
         enabled = !enabled;
         resetState(mc);
-        say(mc, "AutoFarm " + (enabled ? "AÇIK" : "KAPALI") + " | Mod " + MODE_NAMES[cfg.mode]);
+        String msg = "AutoFarm " + (enabled ? "AÇIK" : "KAPALI") + " | Mod " + MODE_NAMES[cfg.mode];
+        say(mc, msg);
+        if (mc.player != null) {
+            mc.player.sendMessage(Text.literal("[AutoFarm] " + msg), false);
+        }
     }
 
     private void resetState(MinecraftClient mc) {
@@ -168,16 +166,30 @@ public class AutoFarmClient implements ClientModInitializer {
     private void onTick(MinecraftClient mc) {
         tickCounter++;
 
-        while (toggleKey.wasPressed()) {
-            if (guiModKey.isPressed()) {
+        // Oyuna girince yüklendiğini göster
+        if (announce && mc.player != null && mc.world != null) {
+            announce = false;
+            mc.player.sendMessage(Text.literal(
+                    "[AutoFarm] Yüklendi. G = aç/kapat, R + G = menü, ya da /autofarm gui"), false);
+        }
+
+        // Tuşlar doğrudan klavyeden okunur (başka modlarla tuş çakışmasından etkilenmez)
+        boolean g = false;
+        boolean r = false;
+        if (mc.currentScreen == null && mc.player != null) {
+            long window = mc.getWindow().getHandle();
+            g = InputUtil.isKeyPressed(window, GLFW.GLFW_KEY_G);
+            r = InputUtil.isKeyPressed(window, GLFW.GLFW_KEY_R);
+        }
+        if (g && !prevG) {
+            if (r) {
                 openGui = true;
             } else {
                 toggle(mc);
             }
         }
-        while (guiModKey.wasPressed()) {
-            // yalnızca tüketiliyor; R tek başına bir şey yapmaz
-        }
+        prevG = g;
+        prevR = r;
 
         if (openGui && mc.player != null && mc.currentScreen == null) {
             openGui = false;
