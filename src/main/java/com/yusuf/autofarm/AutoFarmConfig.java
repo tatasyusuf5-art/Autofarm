@@ -63,7 +63,7 @@ public class AutoFarmConfig {
             Properties p = new Properties();
             p.load(in);
             mode = clamp(parse(p.getProperty("mode"), mode), 0, 2);
-            speed = clamp(parse(p.getProperty("speed"), speed), 1, 10);
+            speed = clamp(parse(p.getProperty("speed"), speed), 1, 15);
             requireHoe = Boolean.parseBoolean(p.getProperty("requireHoe", String.valueOf(requireHoe)));
             requireFortune = Boolean.parseBoolean(p.getProperty("requireFortune", String.valueOf(requireFortune)));
             for (Crop c : Crop.values()) {
