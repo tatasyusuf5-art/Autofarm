@@ -5,33 +5,32 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.minecraft.class_1268;
-import net.minecraft.class_1269;
-import net.minecraft.class_1542;
-import net.minecraft.class_1713;
-import net.minecraft.class_1747;
-import net.minecraft.class_1799;
-import net.minecraft.class_1887;
-import net.minecraft.class_1893;
-import net.minecraft.class_2248;
-import net.minecraft.class_2302;
-import net.minecraft.class_2338;
-import net.minecraft.class_2350;
-import net.minecraft.class_238;
-import net.minecraft.class_239;
-import net.minecraft.class_2421;
-import net.minecraft.class_243;
-import net.minecraft.class_2561;
-import net.minecraft.class_2680;
-import net.minecraft.class_310;
-import net.minecraft.class_3486;
-import net.minecraft.class_3489;
-import net.minecraft.class_3532;
-import net.minecraft.class_3675;
-import net.minecraft.class_3965;
-import net.minecraft.class_6880;
-import net.minecraft.class_746;
-import net.minecraft.class_9304;
+import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.CropBlock;
+import net.minecraft.block.NetherWartBlock;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.component.type.ItemEnchantmentsComponent;
+import net.minecraft.enchantment.Enchantment;
+import net.minecraft.enchantment.Enchantments;
+import net.minecraft.entity.ItemEntity;
+import net.minecraft.item.BlockItem;
+import net.minecraft.item.ItemStack;
+import net.minecraft.registry.entry.RegistryEntry;
+import net.minecraft.registry.tag.FluidTags;
+import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.text.Text;
+import net.minecraft.util.ActionResult;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
 import org.lwjgl.glfw.GLFW;
 
 import java.util.HashMap;
@@ -47,7 +46,7 @@ import java.util.Set;
  */
 public class AutoFarmClient implements ClientModInitializer {
     private static final int SEARCH_RADIUS = 12;     // hedef arama yarıçapı
-    private static final double WALK_STOP = 2.6;     // hedefe bu kadar yaklaşınca dur (daha yakın = daha temiz bakış)
+    private static final double WALK_STOP = 2.6;     // hedefe bu kadar yaklaşınca dur
     private static final int AIM_TICKS = 2;          // işlemden önce hedefe sabit bakma süresi
     private static final int TARGET_TIMEOUT = 140;   // hedefe ulaşamazsa vazgeç (tick)
     private static final int AVOID_DURATION = 18;    // engelden kaçınma süresi (tick)
@@ -65,9 +64,9 @@ public class AutoFarmClient implements ClientModInitializer {
     private boolean enabled = false;
     private boolean openGui = false;
 
-    private class_2338 targetPos;
+    private BlockPos targetPos;
     private Kind targetKind;
-    private class_1542 targetItem;
+    private ItemEntity targetItem;
     private int targetTicks, aimedTicks, actionCooldown, tickCounter, warnCooldown;
     private boolean fwdHeld, jumpHeld, leftHeld, rightHeld;
 
@@ -75,10 +74,10 @@ public class AutoFarmClient implements ClientModInitializer {
     private int avoidDir = 0;
     private int avoidTicks = 0;
     private int stuckTicks = 0;
-    private class_243 lastPos = null;
+    private Vec3d lastPos = null;
 
-    private final Map<class_2338, Integer> blacklist = new HashMap<>();
-    private final Map<class_2338, Integer> replant = new HashMap<>();
+    private final Map<BlockPos, Integer> blacklist = new HashMap<>();
+    private final Map<BlockPos, Integer> replant = new HashMap<>();
     private final Set<Integer> ignoredItems = new HashSet<>();
 
     private boolean prevG = false;
@@ -95,12 +94,12 @@ public class AutoFarmClient implements ClientModInitializer {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
                 dispatcher.register(ClientCommandManager.literal("autofarm")
                         .executes(ctx -> {
-                            toggle(class_310.method_1551());
+                            toggle(MinecraftClient.getInstance());
                             return 1;
                         })
                         .then(ClientCommandManager.literal("gui")
                                 .executes(ctx -> {
-                                    openGui = true;   // sohbet kapandıktan sonra bir sonraki tickte açılır
+                                    openGui = true;
                                     return 1;
                                 }))
                         .then(ClientCommandManager.literal("mode")
@@ -108,8 +107,8 @@ public class AutoFarmClient implements ClientModInitializer {
                                         .executes(ctx -> {
                                             cfg.mode = IntegerArgumentType.getInteger(ctx, "n") - 1;
                                             cfg.save();
-                                            resetState(class_310.method_1551());
-                                            say(class_310.method_1551(), "Mod -> " + MODE_NAMES[cfg.mode]);
+                                            resetState(MinecraftClient.getInstance());
+                                            say(MinecraftClient.getInstance(), "Mod -> " + MODE_NAMES[cfg.mode]);
                                             return 1;
                                         })))
                         .then(ClientCommandManager.literal("speed")
@@ -117,7 +116,7 @@ public class AutoFarmClient implements ClientModInitializer {
                                         .executes(ctx -> {
                                             cfg.speed = IntegerArgumentType.getInteger(ctx, "n");
                                             cfg.save();
-                                            say(class_310.method_1551(), "Hız -> " + cfg.speed + "/10");
+                                            say(MinecraftClient.getInstance(), "Hız -> " + cfg.speed + "/10");
                                             return 1;
                                         })))));
     }
@@ -128,17 +127,17 @@ public class AutoFarmClient implements ClientModInitializer {
         return enabled;
     }
 
-    public void toggle(class_310 mc) {
+    public void toggle(MinecraftClient mc) {
         enabled = !enabled;
         resetState(mc);
         String msg = "AutoFarm " + (enabled ? "AÇIK" : "KAPALI") + " | Mod " + MODE_NAMES[cfg.mode];
         say(mc, msg);
-        if (mc.field_1724 != null) {
-            mc.field_1724.method_7353(class_2561.method_43470("[AutoFarm] " + msg), false);
+        if (mc.player != null) {
+            mc.player.sendMessage(Text.literal("[AutoFarm] " + msg), false);
         }
     }
 
-    private void resetState(class_310 mc) {
+    private void resetState(MinecraftClient mc) {
         clearTarget();
         blacklist.clear();
         replant.clear();
@@ -150,20 +149,19 @@ public class AutoFarmClient implements ClientModInitializer {
         releaseKeys(mc);
     }
 
-    private void say(class_310 mc, String msg) {
-        if (mc.field_1724 != null) {
-            mc.field_1724.method_7353(class_2561.method_43470(msg), true);
+    private void say(MinecraftClient mc, String msg) {
+        if (mc.player != null) {
+            mc.player.sendMessage(Text.literal(msg), true);
         }
     }
 
-    private void warn(class_310 mc, String msg) {
+    private void warn(MinecraftClient mc, String msg) {
         if (warnCooldown == 0) {
             say(mc, msg);
             warnCooldown = 40;
         }
     }
 
-    // Hız ayarı (1..10): bakış dönüş hızı ve işlemler arası bekleme
     private float lookStep() {
         return 5f + 3f * cfg.speed;           // 8 .. 35 derece/tick
     }
@@ -174,23 +172,21 @@ public class AutoFarmClient implements ClientModInitializer {
 
     // ------------------------------------------------------------------ ana döngü
 
-    private void onTick(class_310 mc) {
+    private void onTick(MinecraftClient mc) {
         tickCounter++;
 
-        // Oyuna girince yüklendiğini göster
-        if (announce && mc.field_1724 != null && mc.field_1687 != null) {
+        if (announce && mc.player != null && mc.world != null) {
             announce = false;
-            mc.field_1724.method_7353(class_2561.method_43470(
+            mc.player.sendMessage(Text.literal(
                     "[AutoFarm] Yüklendi. G = aç/kapat, R + G = menü, ya da /autofarm gui"), false);
         }
 
-        // Tuşlar doğrudan klavyeden okunur (başka modlarla tuş çakışmasından etkilenmez)
         boolean g = false;
         boolean r = false;
-        if (mc.field_1755 == null && mc.field_1724 != null) {
-            long window = mc.method_22683().method_4490();
-            g = class_3675.method_15987(window, GLFW.GLFW_KEY_G);
-            r = class_3675.method_15987(window, GLFW.GLFW_KEY_R);
+        if (mc.currentScreen == null && mc.player != null) {
+            long window = mc.getWindow().getHandle();
+            g = org.lwjgl.glfw.GLFW.glfwGetKey(window, GLFW.GLFW_KEY_G) == GLFW.GLFW_PRESS;
+            r = org.lwjgl.glfw.GLFW.glfwGetKey(window, GLFW.GLFW_KEY_R) == GLFW.GLFW_PRESS;
         }
         if (g && !prevG) {
             if (r) {
@@ -202,18 +198,18 @@ public class AutoFarmClient implements ClientModInitializer {
         prevG = g;
         prevR = r;
 
-        if (openGui && mc.field_1724 != null && mc.field_1755 == null) {
+        if (openGui && mc.player != null && mc.currentScreen == null) {
             openGui = false;
             releaseKeys(mc);
-            mc.method_1507(new AutoFarmScreen(this));
+            mc.setScreen(new AutoFarmScreen(this));
             return;
         }
 
         if (warnCooldown > 0) warnCooldown--;
         if (actionCooldown > 0) actionCooldown--;
 
-        if (!enabled || mc.field_1724 == null || mc.field_1687 == null || mc.field_1761 == null
-                || mc.field_1755 != null || mc.field_1724.method_7325()) {
+        if (!enabled || mc.player == null || mc.world == null || mc.interactionManager == null
+                || mc.currentScreen != null || mc.player.isDead()) {
             releaseKeys(mc);
             return;
         }
@@ -227,10 +223,9 @@ public class AutoFarmClient implements ClientModInitializer {
         boolean harvestMode = cfg.mode == 0 || cfg.mode == 2;
         boolean plantMode = cfg.mode == 1 || cfg.mode == 2;
 
-        // Alet zorunlulukları (kırma modlarında ana el)
         if (harvestMode) {
-            class_1799 tool = mc.field_1724.method_6047();
-            if (cfg.requireHoe && !tool.method_31573(class_3489.field_42613)) {
+            ItemStack tool = mc.player.getMainHandStack();
+            if (cfg.requireHoe && !tool.isIn(ItemTags.HOES)) {
                 warn(mc, "Ana ele çapa al! (Çapa zorunluluğu açık)");
                 releaseKeys(mc);
                 return;
@@ -242,20 +237,18 @@ public class AutoFarmClient implements ClientModInitializer {
             }
         }
 
-        // Ekim için elde seçili ekin
-        class_1268 plantHand = null;
-        class_2248 plantBlock = null;
+        Hand plantHand = null;
+        Block plantBlock = null;
         if (plantMode) {
-            plantHand = findPlantHand(mc, cfg.mode == 1);   // Mod 2: ana/2. el, Mod 3: sadece 2. el
+            plantHand = findPlantHand(mc, cfg.mode == 1);
             if (plantHand == null) {
                 supply(mc);
                 releaseKeys(mc);
                 return;
             }
-            plantBlock = ((class_1747) mc.field_1724.method_5998(plantHand).method_7909()).method_7711();
+            plantBlock = ((BlockItem) mc.player.getStackInHand(plantHand).getItem()).getBlock();
         }
 
-        // Hedef geçerli mi?
         if (targetKind != null && !targetStillValid(mc, plantBlock)) {
             clearTarget();
         }
@@ -275,13 +268,13 @@ public class AutoFarmClient implements ClientModInitializer {
         step(mc, plantHand);
     }
 
-    private void step(class_310 mc, class_1268 plantHand) {
-        class_746 p = mc.field_1724;
+    private void step(MinecraftClient mc, Hand plantHand) {
+        ClientPlayerEntity p = mc.player;
 
-        // Takılma tespiti (neredeyse yerinde sayıyorsa)
-        class_243 now = p.method_19538();
+        // Takılma tespiti
+        Vec3d now = p.getPos();
         if (lastPos != null) {
-            double moved = Math.hypot(now.field_1352 - lastPos.field_1352, now.field_1350 - lastPos.field_1350);
+            double moved = Math.hypot(now.x - lastPos.x, now.z - lastPos.z);
             if (moved < 0.05 && (fwdHeld || leftHeld || rightHeld)) {
                 stuckTicks++;
             } else {
@@ -292,9 +285,9 @@ public class AutoFarmClient implements ClientModInitializer {
 
         // Yerdeki eşyaları topla
         if (targetKind == Kind.ITEM) {
-            class_243 ip = targetItem.method_19538();
-            float err = lookAt(p, ip.method_1031(0, 0.1, 0));
-            double hd = Math.hypot(ip.field_1352 - p.method_23317(), ip.field_1350 - p.method_23321());
+            Vec3d ip = targetItem.getPos();
+            float err = lookAt(p, ip.add(0, 0.1, 0));
+            double hd = Math.hypot(ip.x - p.getX(), ip.z - p.getZ());
             if (hd > 0.6) {
                 if (isDangerous(mc, true)) {
                     startAvoid(mc);
@@ -306,46 +299,41 @@ public class AutoFarmClient implements ClientModInitializer {
             return;
         }
 
-        class_243 aim = aimPoint(targetPos, targetKind);
+        Vec3d aim = aimPoint(targetPos, targetKind);
         float yawErr = lookAt(p, aim);
-        double dist = p.method_33571().method_1022(aim);
+        double dist = p.getEyePos().distanceTo(aim);
 
-        // Uzaktaysa yürü; engel varsa etrafından dolaş
         if (dist > WALK_STOP) {
             aimedTicks = 0;
-            if (isDangerous(mc, true) || stuckTicks > 8 || p.field_5976) {
+            if (isDangerous(mc, true) || stuckTicks > 8 || p.horizontalCollision) {
                 startAvoid(mc);
             }
             navigate(mc, yawErr < 45f);
             return;
         }
 
-        // Yakındayız — hareketi durdur, net bakış al
         stopMove(mc);
 
         // Gerçek bakış ışını hedefi gösteriyor mu?
-        class_239 hr = p.method_5745(p.method_55754(), 1.0f, false);
-        class_3965 bhr = null;
+        HitResult hr = p.raycast(p.getBlockInteractionRange(), 1.0f, false);
+        BlockHitResult bhr = null;
         boolean ok = false;
-        if (hr instanceof class_3965 b && b.method_17783() == class_239.class_240.field_1332) {
+        if (hr instanceof BlockHitResult b && b.getType() == HitResult.Type.BLOCK) {
             bhr = b;
             if (targetKind == Kind.HARVEST) {
-                ok = b.method_17777().equals(targetPos);
+                ok = b.getBlockPos().equals(targetPos);
             } else {
-                // Ekim: toprağın üst yüzeyi. Komşu ekin ray'i keserse ok=false olur
-                ok = b.method_17777().equals(targetPos.method_10074())
-                        && b.method_17780() == class_2350.field_11036;
+                ok = b.getBlockPos().equals(targetPos.down())
+                        && b.getSide() == Direction.UP;
             }
         }
 
         if (!ok) {
             aimedTicks = 0;
-            // Ekimde önündeki ekin / engel bakışı kesiyorsa yana kayıp temiz açı ara
             if (targetKind == Kind.PLANT || targetKind == Kind.HARVEST) {
                 if (avoidTicks <= 0) {
                     startAvoid(mc);
                 }
-                // Hafif yana kayarak bakış açısını temizle
                 navigate(mc, false);
             }
             return;
@@ -354,19 +342,18 @@ public class AutoFarmClient implements ClientModInitializer {
         if (++aimedTicks < AIM_TICKS || actionCooldown > 0) return;
 
         if (targetKind == Kind.HARVEST) {
-            mc.field_1761.method_2910(targetPos, bhr.method_17780());
-            p.method_6104(class_1268.field_5808);
+            mc.interactionManager.attackBlock(targetPos, bhr.getSide());
+            p.swingHand(Hand.MAIN_HAND);
             if (cfg.mode == 2) {
-                replant.put(targetPos.method_10062(), tickCounter + 100);
+                replant.put(targetPos.toImmutable(), tickCounter + 100);
             }
         } else {
-            class_1269 r = mc.field_1761.method_2896(p, plantHand, bhr);
-            if (r.method_23665()) {
-                p.method_6104(plantHand);
+            ActionResult r = mc.interactionManager.interactBlock(p, plantHand, bhr);
+            if (r.isAccepted()) {
+                p.swingHand(plantHand);
                 replant.remove(targetPos);
             } else {
-                // Ekim başarısız (muhtemelen hâlâ engel) → kısa blacklist
-                blacklist.put(targetPos.method_10062(), tickCounter + 160);
+                blacklist.put(targetPos.toImmutable(), tickCounter + 160);
             }
         }
         actionCooldown = actionDelay();
@@ -378,27 +365,27 @@ public class AutoFarmClient implements ClientModInitializer {
 
     // ------------------------------------------------------------------ ekin elde tutma / çantadan alma
 
-    private class_1268 findPlantHand(class_310 mc, boolean allowMain) {
-        class_746 p = mc.field_1724;
-        if (allowMain && isSelectedSeed(p.method_6047())) return class_1268.field_5808;
-        if (isSelectedSeed(p.method_6079())) return class_1268.field_5810;
+    private Hand findPlantHand(MinecraftClient mc, boolean allowMain) {
+        ClientPlayerEntity p = mc.player;
+        if (allowMain && isSelectedSeed(p.getMainHandStack())) return Hand.MAIN_HAND;
+        if (isSelectedSeed(p.getOffHandStack())) return Hand.OFF_HAND;
         return null;
     }
 
     /** Çantadaki seçili ekini 2. ele alır. */
-    private void supply(class_310 mc) {
-        class_746 p = mc.field_1724;
-        class_1799 off = p.method_6079();
-        if (!off.method_7960() && !isSeed(off)) {
+    private void supply(MinecraftClient mc) {
+        ClientPlayerEntity p = mc.player;
+        ItemStack off = p.getOffHandStack();
+        if (!off.isEmpty() && !isSeed(off)) {
             warn(mc, "2. el dolu! Ekin otomatik 2. ele alınır, eli boşalt.");
             return;
         }
         if (actionCooldown > 0) return;
         for (int i = 0; i < 36; i++) {
-            if (isSelectedSeed(p.method_31548().method_5438(i))) {
+            if (isSelectedSeed(p.getInventory().getStack(i))) {
                 int slot = i < 9 ? i + 36 : i;
-                mc.field_1761.method_2906(p.field_7498.field_7763, slot, 40,
-                        class_1713.field_7791, p);
+                mc.interactionManager.clickSlot(p.playerScreenHandler.syncId, slot, 40,
+                        SlotActionType.SWAP, p);
                 actionCooldown = 10;
                 return;
             }
@@ -408,34 +395,34 @@ public class AutoFarmClient implements ClientModInitializer {
 
     // ------------------------------------------------------------------ hedef bulma
 
-    private void findTarget(class_310 mc, class_2248 plantBlock) {
-        class_746 p = mc.field_1724;
+    private void findTarget(MinecraftClient mc, Block plantBlock) {
+        ClientPlayerEntity p = mc.player;
         boolean harvest = (cfg.mode == 0 || cfg.mode == 2);
-        class_243 eye = p.method_33571();
-        class_2338 origin = p.method_24515();
+        Vec3d eye = p.getEyePos();
+        BlockPos origin = p.getBlockPos();
 
         double best = Double.MAX_VALUE;
-        class_2338 bestPos = null;
+        BlockPos bestPos = null;
         Kind bestKind = null;
 
-        for (class_2338 pos : class_2338.method_10097(
-                origin.method_10069(-SEARCH_RADIUS, -2, -SEARCH_RADIUS),
-                origin.method_10069(SEARCH_RADIUS, 2, SEARCH_RADIUS))) {
+        for (BlockPos pos : BlockPos.iterate(
+                origin.add(-SEARCH_RADIUS, -2, -SEARCH_RADIUS),
+                origin.add(SEARCH_RADIUS, 2, SEARCH_RADIUS))) {
             if (blacklist.containsKey(pos)) continue;
-            class_2680 s = mc.field_1687.method_8320(pos);
+            BlockState s = mc.world.getBlockState(pos);
             Kind k = null;
-            if (harvest && isMature(s) && cfg.isSelected(s.method_26204())) {
+            if (harvest && isMature(s) && cfg.isSelected(s.getBlock())) {
                 k = Kind.HARVEST;
-            } else if (plantBlock != null && s.method_26215()
+            } else if (plantBlock != null && s.isAir()
                     && (cfg.mode == 1 || replant.containsKey(pos))
-                    && plantBlock.method_9564().method_26184(mc.field_1687, pos)) {
+                    && plantBlock.getDefaultState().canPlaceAt(mc.world, pos)) {
                 k = Kind.PLANT;
             }
             if (k == null) continue;
-            double d = eye.method_1025(class_243.method_24953(pos));
+            double d = eye.squaredDistanceTo(Vec3d.ofCenter(pos));
             if (d < best) {
                 best = d;
-                bestPos = pos.method_10062();
+                bestPos = pos.toImmutable();
                 bestKind = k;
             }
         }
@@ -448,14 +435,13 @@ public class AutoFarmClient implements ClientModInitializer {
             return;
         }
 
-        // Blok hedefi yoksa yere düşen ekinleri topla
         if (harvest) {
-            class_238 box = p.method_5829().method_1009(10, 3, 10);
-            class_1542 bestItem = null;
+            Box box = p.getBoundingBox().expand(10, 3, 10);
+            ItemEntity bestItem = null;
             double bd = Double.MAX_VALUE;
-            for (class_1542 ie : mc.field_1687.method_8390(class_1542.class, box,
-                    x -> !x.method_31481() && !ignoredItems.contains(x.method_5628()))) {
-                double d = ie.method_5858(p);
+            for (ItemEntity ie : mc.world.getEntitiesByClass(ItemEntity.class, box,
+                    x -> !x.isRemoved() && !ignoredItems.contains(x.getId()))) {
+                double d = ie.squaredDistanceTo(p);
                 if (d < bd) {
                     bd = d;
                     bestItem = ie;
@@ -470,16 +456,16 @@ public class AutoFarmClient implements ClientModInitializer {
         }
     }
 
-    private boolean targetStillValid(class_310 mc, class_2248 plantBlock) {
+    private boolean targetStillValid(MinecraftClient mc, Block plantBlock) {
         return switch (targetKind) {
             case HARVEST -> {
-                class_2680 s = mc.field_1687.method_8320(targetPos);
-                yield isMature(s) && cfg.isSelected(s.method_26204());
+                BlockState s = mc.world.getBlockState(targetPos);
+                yield isMature(s) && cfg.isSelected(s.getBlock());
             }
             case PLANT -> plantBlock != null
-                    && mc.field_1687.method_8320(targetPos).method_26215()
-                    && plantBlock.method_9564().method_26184(mc.field_1687, targetPos);
-            case ITEM -> targetItem != null && !targetItem.method_31481();
+                    && mc.world.getBlockState(targetPos).isAir()
+                    && plantBlock.getDefaultState().canPlaceAt(mc.world, targetPos);
+            case ITEM -> targetItem != null && !targetItem.isRemoved();
         };
     }
 
@@ -489,15 +475,13 @@ public class AutoFarmClient implements ClientModInitializer {
         targetItem = null;
         targetTicks = 0;
         aimedTicks = 0;
-        // avoid state'i burada sıfırlama — aynı bölgede başka hedefe geçerken
-        // kaçınma devam etsin diye leave it
     }
 
     private void giveUp() {
         if (targetKind == Kind.ITEM && targetItem != null) {
-            ignoredItems.add(targetItem.method_5628());
+            ignoredItems.add(targetItem.getId());
         } else if (targetPos != null) {
-            blacklist.put(targetPos.method_10062(), tickCounter + 600);
+            blacklist.put(targetPos.toImmutable(), tickCounter + 600);
         }
         avoidDir = 0;
         avoidTicks = 0;
@@ -507,47 +491,41 @@ public class AutoFarmClient implements ClientModInitializer {
 
     // ------------------------------------------------------------------ bakış & hareket
 
-    private static class_243 aimPoint(class_2338 pos, Kind kind) {
+    private static Vec3d aimPoint(BlockPos pos, Kind kind) {
         if (kind == Kind.HARVEST) {
-            // Ekinin ortası (komşu ekinle çakışmayı azaltmak için biraz aşağı)
-            return new class_243(pos.method_10263() + 0.5, pos.method_10264() + 0.25, pos.method_10260() + 0.5);
+            return new Vec3d(pos.getX() + 0.5, pos.getY() + 0.25, pos.getZ() + 0.5);
         }
-        // Ekim: tarla bloğunun üst yüzeyi — daha dik bakış için biraz daha aşağı hedefle
-        return new class_243(pos.method_10263() + 0.5, pos.method_10264() - 1 + 0.85, pos.method_10260() + 0.5);
+        return new Vec3d(pos.getX() + 0.5, pos.getY() - 1 + 0.85, pos.getZ() + 0.5);
     }
 
-    /** Kamerayı hedefe doğru kademeli çevirir; kalan yaw hatasını (derece) döndürür. */
-    private float lookAt(class_746 p, class_243 target) {
+    private float lookAt(ClientPlayerEntity p, Vec3d target) {
         float step = lookStep();
-        class_243 eye = p.method_33571();
-        double dx = target.field_1352 - eye.field_1352;
-        double dy = target.field_1351 - eye.field_1351;
-        double dz = target.field_1350 - eye.field_1350;
+        Vec3d eye = p.getEyePos();
+        double dx = target.x - eye.x;
+        double dy = target.y - eye.y;
+        double dz = target.z - eye.z;
         double h = Math.sqrt(dx * dx + dz * dz);
 
         float wantYaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
         float wantPitch = (float) (-Math.toDegrees(Math.atan2(dy, h)));
 
-        float yawDiff = class_3532.method_15393(wantYaw - p.method_36454());
-        float pitchDiff = wantPitch - p.method_36455();
+        float yawDiff = MathHelper.wrapDegrees(wantYaw - p.getYaw());
+        float pitchDiff = wantPitch - p.getPitch();
 
-        p.method_36456(p.method_36454() + class_3532.method_15363(yawDiff, -step, step));
-        p.method_36457(class_3532.method_15363(p.method_36455() + class_3532.method_15363(pitchDiff, -step, step), -90f, 90f));
+        p.setYaw(p.getYaw() + MathHelper.clamp(yawDiff, -step, step));
+        p.setPitch(MathHelper.clamp(p.getPitch() + MathHelper.clamp(pitchDiff, -step, step), -90f, 90f));
 
         return Math.abs(yawDiff) > step ? Math.abs(yawDiff) - step : 0f;
     }
 
-    /** İleri + (gerekirse) yana kayarak en güvenli yoldan ilerle. */
-    private void navigate(class_310 mc, boolean wantForward) {
-        class_746 p = mc.field_1724;
+    private void navigate(MinecraftClient mc, boolean wantForward) {
+        ClientPlayerEntity p = mc.player;
 
         if (avoidTicks > 0) {
             avoidTicks--;
-            // Kaçınma sırasında hafif ileri + yana
             setMove(mc, true, avoidDir < 0, avoidDir > 0);
-            // Engel hâlâ varsa zıpla (basamak / alçak fener kenarı)
-            boolean jump = p.field_5976 && p.method_24828();
-            mc.field_1690.field_1903.method_23481(jump);
+            boolean jump = p.horizontalCollision && p.isOnGround();
+            mc.options.jumpKey.setPressed(jump);
             jumpHeld = jump;
             if (avoidTicks == 0) {
                 avoidDir = 0;
@@ -556,68 +534,61 @@ public class AutoFarmClient implements ClientModInitializer {
         }
 
         setMove(mc, wantForward, false, false);
-        boolean jump = wantForward && p.field_5976 && p.method_24828();
-        mc.field_1690.field_1903.method_23481(jump);
+        boolean jump = wantForward && p.horizontalCollision && p.isOnGround();
+        mc.options.jumpKey.setPressed(jump);
         jumpHeld = jump;
     }
 
-    private void stopMove(class_310 mc) {
+    private void stopMove(MinecraftClient mc) {
         setMove(mc, false, false, false);
         if (jumpHeld) {
-            mc.field_1690.field_1903.method_23481(false);
+            mc.options.jumpKey.setPressed(false);
             jumpHeld = false;
         }
     }
 
-    private void setMove(class_310 mc, boolean fwd, boolean left, boolean right) {
-        mc.field_1690.field_1894.method_23481(fwd);
-        mc.field_1690.field_1913.method_23481(left);   // A
-        mc.field_1690.field_1849.method_23481(right);  // D
+    private void setMove(MinecraftClient mc, boolean fwd, boolean left, boolean right) {
+        mc.options.forwardKey.setPressed(fwd);
+        mc.options.leftKey.setPressed(left);
+        mc.options.rightKey.setPressed(right);
         fwdHeld = fwd;
         leftHeld = left;
         rightHeld = right;
     }
 
-    private void releaseKeys(class_310 mc) {
+    private void releaseKeys(MinecraftClient mc) {
         if (fwdHeld || leftHeld || rightHeld || jumpHeld) {
-            mc.field_1690.field_1894.method_23481(false);
-            mc.field_1690.field_1913.method_23481(false);
-            mc.field_1690.field_1849.method_23481(false);
-            mc.field_1690.field_1903.method_23481(false);
+            mc.options.forwardKey.setPressed(false);
+            mc.options.leftKey.setPressed(false);
+            mc.options.rightKey.setPressed(false);
+            mc.options.jumpKey.setPressed(false);
             fwdHeld = leftHeld = rightHeld = jumpHeld = false;
         }
     }
 
-    /** Engel / su / lav / uçurum algılanınca yana kaçınmayı başlat. */
-    private void startAvoid(class_310 mc) {
+    private void startAvoid(MinecraftClient mc) {
         if (avoidTicks > 0) return;
-        // Hedefe göre hangi taraf daha açık, onu tercih et
         int preferred = chooseSaferSide(mc);
         avoidDir = preferred != 0 ? preferred : (tickCounter % 2 == 0 ? 1 : -1);
         avoidTicks = AVOID_DURATION;
         stuckTicks = 0;
     }
 
-    /**
-     * Hedefin soluna / sağına bakarak su veya katı engel daha az olan tarafı seç.
-     * @return -1 sol, +1 sağ, 0 belirsiz
-     */
-    private int chooseSaferSide(class_310 mc) {
-        class_746 p = mc.field_1724;
-        class_243 eye = p.method_33571();
-        class_243 toTarget;
+    private int chooseSaferSide(MinecraftClient mc) {
+        ClientPlayerEntity p = mc.player;
+        Vec3d eye = p.getEyePos();
+        Vec3d toTarget;
         if (targetKind == Kind.ITEM && targetItem != null) {
-            toTarget = targetItem.method_19538().method_1020(eye);
+            toTarget = targetItem.getPos().subtract(eye);
         } else if (targetPos != null) {
-            toTarget = class_243.method_24953(targetPos).method_1020(eye);
+            toTarget = Vec3d.ofCenter(targetPos).subtract(eye);
         } else {
             return 0;
         }
-        // Yatay dik (sol / sağ) vektör
-        double len = Math.hypot(toTarget.field_1352, toTarget.field_1350);
+        double len = Math.hypot(toTarget.x, toTarget.z);
         if (len < 1e-4) return 0;
-        double rx = -toTarget.field_1350 / len;
-        double rz = toTarget.field_1352 / len;
+        double rx = -toTarget.z / len;
+        double rz = toTarget.x / len;
 
         int leftScore = sideScore(mc, eye, -rx, -rz);
         int rightScore = sideScore(mc, eye, rx, rz);
@@ -626,29 +597,24 @@ public class AutoFarmClient implements ClientModInitializer {
         return 0;
     }
 
-    /** Bir yöne 1-3 blok bak: su/lav/uçurum/katı engel yoksa yüksek puan. */
-    private int sideScore(class_310 mc, class_243 from, double dx, double dz) {
+    private int sideScore(MinecraftClient mc, Vec3d from, double dx, double dz) {
         int score = 0;
         for (int step = 1; step <= 3; step++) {
-            class_2338 pos = class_2338.method_49638(
-                    from.method_1031(dx * step, 0, dz * step));
-            class_2680 ground = mc.field_1687.method_8320(pos.method_10074());
-            class_2680 feet = mc.field_1687.method_8320(pos);
-            class_2680 head = mc.field_1687.method_8320(pos.method_10084());
+            BlockPos pos = BlockPos.ofFloored(from.add(dx * step, 0, dz * step));
+            BlockState ground = mc.world.getBlockState(pos.down());
+            BlockState feet = mc.world.getBlockState(pos);
+            BlockState head = mc.world.getBlockState(pos.up());
 
-            // Lav veya su → kötü
             if (isFluidDanger(feet) || isFluidDanger(head) || isFluidDanger(ground)) {
                 score -= 5;
                 continue;
             }
-            // Uçurum (alt boş)
-            if (ground.method_26220(mc.field_1687, pos.method_10074()).method_1110()
-                    && ground.method_26227().method_15769()) {
+            if (ground.getCollisionShape(mc.world, pos.down()).isEmpty()
+                    && ground.getFluidState().isEmpty()) {
                 score -= 4;
                 continue;
             }
-            // Ayak veya kafa hizasında katı engel (fener, duvar, ekin dışı blok)
-            if (isSolidObstacle(feet, mc, pos) || isSolidObstacle(head, mc, pos.method_10084())) {
+            if (isSolidObstacle(feet, mc, pos) || isSolidObstacle(head, mc, pos.up())) {
                 score -= 3;
                 continue;
             }
@@ -657,46 +623,39 @@ public class AutoFarmClient implements ClientModInitializer {
         return score;
     }
 
-    private static boolean isFluidDanger(class_2680 s) {
-        return s.method_26227().method_15767(class_3486.field_15518)   // lava
-                || s.method_26227().method_15767(class_3486.field_15517); // water
+    private static boolean isFluidDanger(BlockState s) {
+        return s.getFluidState().isIn(FluidTags.LAVA)
+                || s.getFluidState().isIn(FluidTags.WATER);
     }
 
-    /** Fener, duvar, çit vb. — ekin / hava / tarla değilse engel say. */
-    private static boolean isSolidObstacle(class_2680 s, class_310 mc, class_2338 pos) {
-        if (s.method_26215()) return false;
-        class_2248 b = s.method_26204();
-        if (b instanceof class_2302 || b instanceof class_2421) return false; // ekin serbest
-        // Çarpışma kutusu boşsa (halı, basınç plakası) sorun değil
-        return !s.method_26220(mc.field_1687, pos).method_1110();
+    private static boolean isSolidObstacle(BlockState s, MinecraftClient mc, BlockPos pos) {
+        if (s.isAir()) return false;
+        Block b = s.getBlock();
+        if (b instanceof CropBlock || b instanceof NetherWartBlock) return false;
+        return !s.getCollisionShape(mc.world, pos).isEmpty();
     }
 
-    /**
-     * Önümüzdeki yol tehlikeli mi? (su, lav, uçurum, katı engel)
-     * @param checkBody true ise ayak + kafa yüksekliğini de kontrol et (fener için)
-     */
-    private boolean isDangerous(class_310 mc, boolean checkBody) {
-        class_746 p = mc.field_1724;
-        class_243 dir = class_243.method_1030(0, p.method_36454());
-        class_243 base = p.method_19538();
+    private boolean isDangerous(MinecraftClient mc, boolean checkBody) {
+        ClientPlayerEntity p = mc.player;
+        Vec3d dir = Vec3d.fromPolar(0, p.getYaw());
+        Vec3d base = p.getPos();
 
         for (int i = 1; i <= 3; i++) {
-            class_243 probe = base.method_1019(dir.method_1021(i));
-            class_2338 pos = class_2338.method_49638(probe);
-            class_2680 ground = mc.field_1687.method_8320(pos.method_10074());
-            class_2680 feet = mc.field_1687.method_8320(pos);
-            class_2680 head = mc.field_1687.method_8320(pos.method_10084());
+            Vec3d probe = base.add(dir.multiply(i));
+            BlockPos pos = BlockPos.ofFloored(probe);
+            BlockState ground = mc.world.getBlockState(pos.down());
+            BlockState feet = mc.world.getBlockState(pos);
+            BlockState head = mc.world.getBlockState(pos.up());
 
             if (isFluidDanger(feet) || isFluidDanger(head) || isFluidDanger(ground)) return true;
 
-            // Uçurum
-            if (ground.method_26220(mc.field_1687, pos.method_10074()).method_1110()
-                    && ground.method_26227().method_15769()) {
+            if (ground.getCollisionShape(mc.world, pos.down()).isEmpty()
+                    && ground.getFluidState().isEmpty()) {
                 return true;
             }
 
             if (checkBody) {
-                if (isSolidObstacle(feet, mc, pos) || isSolidObstacle(head, mc, pos.method_10084())) {
+                if (isSolidObstacle(feet, mc, pos) || isSolidObstacle(head, mc, pos.up())) {
                     return true;
                 }
             }
@@ -706,32 +665,32 @@ public class AutoFarmClient implements ClientModInitializer {
 
     // ------------------------------------------------------------------ yardımcılar
 
-    private static boolean isMature(class_2680 state) {
-        class_2248 b = state.method_26204();
-        if (b instanceof class_2302 crop) {
-            return crop.method_9825(state);
+    private static boolean isMature(BlockState state) {
+        Block b = state.getBlock();
+        if (b instanceof CropBlock crop) {
+            return crop.isMature(state);
         }
-        if (b instanceof class_2421) {
-            return state.method_11654(class_2421.field_11306) >= 3;
+        if (b instanceof NetherWartBlock) {
+            return state.get(NetherWartBlock.AGE) >= 3;
         }
         return false;
     }
 
-    private static boolean isSeed(class_1799 stack) {
-        if (stack.method_7960() || !(stack.method_7909() instanceof class_1747 bi)) return false;
-        class_2248 b = bi.method_7711();
-        return b instanceof class_2302 || b instanceof class_2421;
+    private static boolean isSeed(ItemStack stack) {
+        if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem bi)) return false;
+        Block b = bi.getBlock();
+        return b instanceof CropBlock || b instanceof NetherWartBlock;
     }
 
-    private boolean isSelectedSeed(class_1799 stack) {
-        return isSeed(stack) && cfg.isSelected(((class_1747) stack.method_7909()).method_7711());
+    private boolean isSelectedSeed(ItemStack stack) {
+        return isSeed(stack) && cfg.isSelected(((BlockItem) stack.getItem()).getBlock());
     }
 
-    private static int fortuneLevel(class_1799 stack) {
-        class_9304 ench = stack.method_58657();
-        for (class_6880<class_1887> e : ench.method_57534()) {
-            if (e.method_40225(class_1893.field_9130)) {
-                return ench.method_57536(e);
+    private static int fortuneLevel(ItemStack stack) {
+        ItemEnchantmentsComponent ench = stack.getEnchantments();
+        for (RegistryEntry<Enchantment> e : ench.getEnchantments()) {
+            if (e.matchesKey(Enchantments.FORTUNE)) {
+                return ench.getLevel(e);
             }
         }
         return 0;
