@@ -1,6 +1,5 @@
 package com.yusuf.autofarm;
 
-import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
@@ -70,7 +69,7 @@ public class AutoFarmScreen extends Screen {
 
         // Başlat/Durdur + Kapat
         addDrawableChild(ButtonWidget.builder(startText(), b -> {
-            farm.toggle(MinecraftClient.getInstance());
+            farm.toggle(net.minecraft.client.MinecraftClient.getInstance());
             b.setMessage(startText());
         }).dimensions(left, y, half, 20).build());
         addDrawableChild(ButtonWidget.builder(Text.literal("Kapat"), b -> this.close())
