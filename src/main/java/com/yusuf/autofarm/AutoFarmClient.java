@@ -604,7 +604,8 @@ public class AutoFarmClient implements ClientModInitializer {
             return;
         }
 
-        boolean jump = p.isOnGround() && wp.getY() > feetCell(p).getY();
+        boolean needsClimb = wp.getY() > feetCell(p).getY();
+        boolean jump = needsClimb && p.isOnGround() && p.horizontalCollision;
         moveToward(mc, cx, cz, jump);
     }
 
