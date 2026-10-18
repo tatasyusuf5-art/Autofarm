@@ -16,6 +16,7 @@ public class AutoFarmScreen extends Screen {
     private final AutoFarmClient farm;
     private int titleY = 10;
     private TextFieldWidget floorsField;
+    private TextFieldWidget laneField;
 
     public AutoFarmScreen(AutoFarmClient client) {
         super(Text.literal("AutoFarm Ayarları"));
@@ -97,10 +98,22 @@ public class AutoFarmScreen extends Screen {
             }
         });
         addDrawableChild(floorsField);
-        addDrawableChild(ButtonWidget.builder(Text.literal("Tarlayı Temizle"), b -> {
+
+        laneField = new TextFieldWidget(this.textRenderer, left + 68, y, 60, 20, Text.literal("Şerit"));
+        laneField.setText(String.valueOf(cfg.laneSpacing));
+        laneField.setChangedListener(txt -> {
+            try {
+                int v = Integer.parseInt(txt.trim());
+                cfg.laneSpacing = Math.max(1, Math.min(16, v));
+            } catch (NumberFormatException ignored) {
+            }
+        });
+        addDrawableChild(laneField);
+
+        addDrawableChild(ButtonWidget.builder(Text.literal("Temizle"), b -> {
             cfg.fieldSet = false;
             cfg.save();
-        }).dimensions(left + 68, y, bw - 68, 20).build());
+        }).dimensions(left + 136, y, bw - 136, 20).build());
         y += gap;
 
         // Tuş atamaları
