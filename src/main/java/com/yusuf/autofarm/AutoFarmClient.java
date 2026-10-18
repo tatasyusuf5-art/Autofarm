@@ -53,7 +53,7 @@ import java.util.Set;
  */
 public class AutoFarmClient implements ClientModInitializer {
     private static final int SEARCH_RADIUS = 12;     // tarla kaydı yoksa kullanılan serbest arama yarıçapı
-    private static final double WALK_STOP_LEGIT = 3.0;   // legit modda kırma için hedefe bu kadar yaklaşınca dur
+    private static final double WALK_STOP_LEGIT = 4.2;   // legit modda kırma için hedefe bu kadar yaklaşınca dur (reach sınırına yakın: durmadan, yürürken de kırabilsin)
     private static final double PLANT_STRICT = 0.3;
     private static final double PLANT_RELAXED = 0.9;
     private static final int AIM_TICKS = 1;
@@ -704,6 +704,14 @@ public class AutoFarmClient implements ClientModInitializer {
     private void navigate(MinecraftClient mc, Vec3d goalAim, Kind kind, double radius) {
         ClientPlayerEntity p = mc.player;
 
+        // Hızlı yol: hedef, önümüzdeki düz çizgide ve engelsizse A* çalıştırmadan
+        // direkt o yöne yürü. Tarlada sıra boyunca sürekli koşmayı sağlayan asıl kısım
+        // burasıdır; A* sadece gerçekten engele takılınca devreye girer.
+        if (path == null && straightLineClear(mc, goalAim)) {
+            moveToward(mc, goalAim.x, goalAim.z, false);
+            return;
+        }
+
         if (path == null) {
             List<BlockPos> found = findPath(mc, goalAim, kind, radius);
             if (found == null && kind == Kind.PLANT && radius < PLANT_RELAXED) {
@@ -735,7 +743,7 @@ public class AutoFarmClient implements ClientModInitializer {
         double cz = wp.getZ() + 0.5;
         double d = Math.hypot(cx - p.getX(), cz - p.getZ());
 
-        if (d < 0.5 && Math.abs(p.getY() - wp.getY()) < 1.6) {
+        if (d < 1.1 && Math.abs(p.getY() - wp.getY()) < 1.6) {
             pathIdx++;
             if (pathIdx >= path.size()) {
                 path = null;
@@ -776,6 +784,8 @@ public class AutoFarmClient implements ClientModInitializer {
         mc.options.leftKey.setPressed(l);
         mc.options.rightKey.setPressed(r);
         mc.options.jumpKey.setPressed(j);
+        // İleri giderken koşsun (Sprint tuşunu da tutarak) — tarlada sürekli hızlı yürüsün.
+        mc.options.sprintKey.setPressed(f && !b);
         keysHeld = f || b || l || r || j;
     }
 
@@ -783,6 +793,7 @@ public class AutoFarmClient implements ClientModInitializer {
         if (keysHeld) {
             setKeys(mc, false, false, false, false, false);
         }
+        mc.options.sprintKey.setPressed(false);
     }
 
     // ------------------------------------------------------------------ A* yol bulma
@@ -871,6 +882,32 @@ public class AutoFarmClient implements ClientModInitializer {
             return canStand(w, n);
         }
         return canStand(w, n) && passable(w, c.up(2));
+    }
+
+    /**
+     * Oyuncudan hedefe düz çizgide, aradaki hücreler yürünebilir mi diye hızlı bir kontrol.
+     * Satır içinde ardışık ekinleri tararken her adımda A* çalıştırmamak için kullanılır:
+     * yol açıksa doğrudan yürür, kapalıysa navigate() otomatik olarak tam A*'a döner.
+     */
+    private boolean straightLineClear(MinecraftClient mc, Vec3d goalAim) {
+        ClientPlayerEntity p = mc.player;
+        ClientWorld w = mc.world;
+        BlockPos start = feetCell(p);
+        BlockPos end = BlockPos.ofFloored(goalAim.x, p.getY(), goalAim.z);
+        if (start.equals(end)) return true;
+
+        double dx = end.getX() - start.getX();
+        double dz = end.getZ() - start.getZ();
+        double dist = Math.hypot(dx, dz);
+        if (dist > 10) return false;   // çok uzaksa A*'a bırak, daha güvenli planlar
+        int steps = (int) Math.ceil(dist);
+        for (int i = 1; i <= steps; i++) {
+            double t = (double) i / steps;
+            BlockPos probe = BlockPos.ofFloored(start.getX() + dx * t + 0.5, start.getY(), start.getZ() + dz * t + 0.5);
+            if (!canStand(w, probe)) return false;
+            if (Math.abs(probe.getY() - start.getY()) > 0) return false;   // düz çizgi modunda kat değişimi yok
+        }
+        return true;
     }
 
     private boolean canStand(ClientWorld w, BlockPos p) {
