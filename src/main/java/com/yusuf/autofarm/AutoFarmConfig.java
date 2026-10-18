@@ -58,6 +58,7 @@ public class AutoFarmConfig {
     public boolean fieldSet = false;
     public int fx1, fy1, fz1, fx2, fy2, fz2;
     public int floors = 1;             // kaç kat yukarı tekrarlansın
+    public int laneSpacing = 9;        // şeritler arası blok aralığı (reach iki yana tarasın diye)
 
     public boolean isSelected(Block b) {
         Crop c = Crop.of(b);
@@ -121,6 +122,7 @@ public class AutoFarmConfig {
             fy2 = parse(p.getProperty("fy2"), 0);
             fz2 = parse(p.getProperty("fz2"), 0);
             floors = clamp(parse(p.getProperty("floors"), 1), 1, 64);
+            laneSpacing = clamp(parse(p.getProperty("laneSpacing"), 9), 1, 16);
         } catch (IOException ignored) {
         }
     }
@@ -146,6 +148,7 @@ public class AutoFarmConfig {
         p.setProperty("fy2", String.valueOf(fy2));
         p.setProperty("fz2", String.valueOf(fz2));
         p.setProperty("floors", String.valueOf(floors));
+        p.setProperty("laneSpacing", String.valueOf(laneSpacing));
         try (OutputStream out = Files.newOutputStream(file())) {
             p.store(out, "AutoFarm ayarlari");
         } catch (IOException ignored) {
