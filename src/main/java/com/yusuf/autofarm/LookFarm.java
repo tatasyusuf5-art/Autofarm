@@ -1,6 +1,5 @@
 package com.yusuf.autofarm;
 
-import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.CropBlock;
@@ -15,7 +14,6 @@ import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.screen.slot.SlotActionType;
@@ -25,198 +23,188 @@ import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.Vec3d;
 
 /**
- * Mod 4: sadece baktığın bloğa çalışır. Yürümez, bakış çevirmez.
- * Her tick: olgunsa kır -> boşsa ek -> kemik tozu bas.
+ * Mod 4: baktığın ekin için oyuncunun elle yapacağı şeyi yapar. Hile yok:
+ *  - Her tick'te EN FAZLA TEK eylem.
+ *  - Eşya gerçekten ele alınır: hotbar slotu seçilir (1-9 tuşu gibi), sunucuyla senkron
+ *    olması için bir sonraki tick beklenir, ondan sonra kullanılır.
+ *  - Tıklama noktası gerçek bakış ışınından gelir (uydurma değil). Yürümez, bakış çevirmez.
  *
- * Sunucu atmasın diye paket bütçesi var: saniyede kullanılabilecek paket sayısı
- * hız ayarına bağlı (16 + hız * 8). Bütçe dolarsa o tick beklenir, sonraki tick devam eder.
- * Kötü bir şey olmaz: her tick'te durum dünyadan yeniden okunur.
+ * Akış (baktığın bloğa göre):
+ *  olgun ekin  -> çapayı ele al, kır
+ *  boş toprak  -> ekini kullan (2. elde olması önerilir; 2. el boşsa çantadan alınır)
+ *  büyüyen ekin-> kemik tozunu ele al, kemik tozu bas
  *
- * Yerleşim (önerilen): ekin (havuç vs.) 2. elde, hotbarda çapa + kemik tozu.
- * 2. el boşsa ekin otomatik 2. ele alınır. Ekin 2. elde değilse hotbardan slot değiştirerek ekilir.
+ * Önerilen yerleşim: 2. elde ekin (havuç), hotbarda çapa + kemik tozu.
+ * Hız ayarı eylemler arası bekleme süresini belirler (15 = her tick bir eylem).
  */
 public final class LookFarm {
-    /** Son 20 tick'te kullanılan paket sayısı (yaklaşık 1 saniye). */
-    private static final int[] WINDOW = new int[20];
-    private static int widx = 0;
-    private static int left = 0;
-    private static int serverSlot = -1;
+    private static int cooldown = 0;
 
     private LookFarm() {
     }
 
-    private static boolean spend(int n) {
-        if (n > left) return false;
-        left -= n;
-        WINDOW[widx] += n;
-        return true;
+    private static int gapTicks(AutoFarmConfig cfg) {
+        if (cfg.speed >= 13) return 1;
+        if (cfg.speed >= 9) return 2;
+        if (cfg.speed >= 5) return 3;
+        return 4;
     }
 
     /** @return ekranda gösterilecek uyarı, sorun yoksa null */
     public static String tick(MinecraftClient mc, AutoFarmConfig cfg) {
-        // paket penceresini ilerlet (boş tick'lerde de eskir)
-        widx = (widx + 1) % WINDOW.length;
-        WINDOW[widx] = 0;
-        int used = 0;
-        for (int v : WINDOW) used += v;
-        left = (16 + cfg.speed * 8) - used;
-
         ClientPlayerEntity p = mc.player;
         ClientWorld w = mc.world;
         ClientPlayerInteractionManager im = mc.interactionManager;
         if (p == null || w == null || im == null) return null;
-        if (left < 2) return null;
 
-        if (!(mc.crosshairTarget instanceof BlockHitResult look) || look.getType() != HitResult.Type.BLOCK) {
+        if (cooldown > 0) {
+            cooldown--;
             return null;
         }
 
-        // Baktığın blok ekin mi, çiftlik toprağı mı?
-        BlockPos hp = look.getBlockPos();
+        // Gerçek bakış ışını (oyuncunun şu an baktığı yer)
+        HitResult hr = p.raycast(p.getBlockInteractionRange(), 1.0F, false);
+        if (!(hr instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) return null;
+
+        BlockPos hp = hit.getBlockPos();
         BlockState hs = w.getBlockState(hp);
-        BlockPos farm;
-        BlockPos crop;
-        if (hs.getBlock() instanceof CropBlock) {
-            crop = hp;
-            farm = hp.down();
-        } else if (hs.isOf(Blocks.FARMLAND)) {
-            farm = hp;
-            crop = hp.up();
-        } else {
+        int gap = gapTicks(cfg);
+
+        if (hs.getBlock() instanceof CropBlock crop) {
+            if (!cfg.isSelected(hs.getBlock())) return null;
+            if (crop.isMature(hs)) {
+                return harvest(p, im, cfg, hit, gap);
+            }
+            return boneMeal(p, im, hit, gap);
+        }
+
+        if (hs.isOf(Blocks.FARMLAND) && hit.getSide() == Direction.UP && w.getBlockState(hp.up()).isAir()) {
+            return plant(p, im, cfg, hit, gap);
+        }
+
+        return null;
+    }
+
+    // ---------------------------------------------------------------- kır
+
+    private static String harvest(ClientPlayerEntity p, ClientPlayerInteractionManager im,
+                                  AutoFarmConfig cfg, BlockHitResult hit, int gap) {
+        PlayerInventory inv = p.getInventory();
+        int hoe = bestHoeSlot(inv);
+
+        if (cfg.requireHoe && hoe < 0) return "Hotbara çapa koy! (Çapa zorunluluğu açık)";
+        if (cfg.requireFortune && (hoe < 0 || fortune(inv.getStack(hoe)) < 3)) {
+            return "Hotbarda Servet III alet olmalı! (Servet III zorunluluğu açık)";
+        }
+
+        // Çapa ele alınmamışsa: önce ele al, sonraki tick'te kır (sunucu senkronu için)
+        if (hoe >= 0 && inv.selectedSlot != hoe) {
+            inv.selectedSlot = hoe;
+            cooldown = 0;
             return null;
         }
 
-        if (!w.getBlockState(farm).isOf(Blocks.FARMLAND)) return null;
+        im.attackBlock(hit.getBlockPos(), hit.getSide());
+        p.swingHand(Hand.MAIN_HAND);
+        cooldown = gap - 1;
+        return hoe < 0 ? "Hotbarda çapa yok! (elle kırılıyor)" : null;
+    }
 
-        BlockState cs = w.getBlockState(crop);
-        boolean hasCrop = cs.getBlock() instanceof CropBlock;
-        if (hasCrop && !cfg.isSelected(cs.getBlock())) return null;
-        if (!hasCrop && !cs.isAir()) return null;
+    // ---------------------------------------------------------------- kemik tozu
 
+    private static String boneMeal(ClientPlayerEntity p, ClientPlayerInteractionManager im,
+                                   BlockHitResult hit, int gap) {
         PlayerInventory inv = p.getInventory();
-        // Sunucudaki slot = bizim son seçtiğimiz slot (oyun her tick başında senkronluyor)
-        serverSlot = inv.selectedSlot;
+        boolean inHand = p.getMainHandStack().isOf(Items.BONE_MEAL) || p.getOffHandStack().isOf(Items.BONE_MEAL);
 
-        // Hotbar taraması: çapa (en yüksek Servet) ve kemik tozu
-        int hoe = -1;
-        int bone = -1;
+        if (!inHand) {
+            int bone = -1;
+            for (int i = 0; i < 9; i++) {
+                if (inv.getStack(i).isOf(Items.BONE_MEAL)) {
+                    bone = i;
+                    break;
+                }
+            }
+            if (bone < 0) return "Kemik tozu yok! (hotbara ya da 2. ele koy)";
+            inv.selectedSlot = bone;
+            cooldown = 0;
+            return null;
+        }
+
+        use(p, im, hit);
+        cooldown = gap - 1;
+        return null;
+    }
+
+    // ---------------------------------------------------------------- ek
+
+    private static String plant(ClientPlayerEntity p, ClientPlayerInteractionManager im,
+                                AutoFarmConfig cfg, BlockHitResult hit, int gap) {
+        PlayerInventory inv = p.getInventory();
+        ItemStack main = p.getMainHandStack();
+        ItemStack off = p.getOffHandStack();
+
+        if (isUsableSeed(off, cfg) || isUsableSeed(main, cfg)) {
+            use(p, im, hit);
+            cooldown = gap - 1;
+            return null;
+        }
+
+        // 2. el boşsa ekini çantadan 2. ele al (oyuncunun F / envanter takası gibi), sonraki tick'te ek
+        if (off.isEmpty()) {
+            int from = -1;
+            for (int i = 0; i < 36; i++) {
+                if (isUsableSeed(inv.getStack(i), cfg)) {
+                    from = i;
+                    break;
+                }
+            }
+            if (from < 0) return "Çantada ekin bulunamadı!";
+            int slot = from < 9 ? from + 36 : from;
+            im.clickSlot(p.playerScreenHandler.syncId, slot, 40, SlotActionType.SWAP, p);
+            cooldown = 1;
+            return null;
+        }
+
+        // 2. el başka bir şeyle dolu: ekini hotbardan ele al
+        for (int i = 0; i < 9; i++) {
+            if (isUsableSeed(inv.getStack(i), cfg)) {
+                inv.selectedSlot = i;
+                cooldown = 0;
+                return null;
+            }
+        }
+        return "Ekin yok! (2. eli boşalt ya da hotbara ekin koy)";
+    }
+
+    // ---------------------------------------------------------------- yardımcılar
+
+    /** Vanilla sağ tık gibi: önce ana el, kabul edilmezse 2. el. Gerçek bakış sonucuyla. */
+    private static void use(ClientPlayerEntity p, ClientPlayerInteractionManager im, BlockHitResult hit) {
+        for (Hand hand : Hand.values()) {
+            if (p.getStackInHand(hand).isEmpty()) continue;
+            ActionResult r = im.interactBlock(p, hand, hit);
+            if (r.isAccepted()) {
+                p.swingHand(hand);
+                return;
+            }
+        }
+    }
+
+    private static int bestHoeSlot(PlayerInventory inv) {
+        int best = -1;
         for (int i = 0; i < 9; i++) {
             ItemStack s = inv.getStack(i);
-            if (bone < 0 && s.isOf(Items.BONE_MEAL)) bone = i;
-            if (s.isIn(ItemTags.HOES) && (hoe < 0 || fortune(s) > fortune(inv.getStack(hoe)))) hoe = i;
+            if (s.isIn(ItemTags.HOES) && (best < 0 || fortune(s) > fortune(inv.getStack(best)))) best = i;
         }
-        boolean offBone = p.getOffHandStack().isOf(Items.BONE_MEAL);
-
-        String notice = hoe < 0 ? "Hotbarda çapa yok! (elle kırılıyor)" : null;
-        boolean swing = false;
-        boolean planted = false;
-        Block brokenBlock = null;
-
-        // 1) Olgunsa kır
-        if (hasCrop && ((CropBlock) cs.getBlock()).isMature(cs)) {
-            if (cfg.requireHoe && hoe < 0) return "Hotbara çapa koy! (Çapa zorunluluğu açık)";
-            if (cfg.requireFortune && (hoe < 0 || fortune(inv.getStack(hoe)) < 3)) {
-                return "Hotbarda Servet III alet olmalı! (Servet III zorunluluğu açık)";
-            }
-            int cost = 1 + (hoe >= 0 && serverSlot != hoe ? 2 : 0);
-            if (!spend(cost)) return notice;
-            if (hoe >= 0) select(p, inv, hoe);
-            im.attackBlock(crop, Direction.UP);
-            swing = true;
-            brokenBlock = cs.getBlock();
-            hasCrop = false;
-        }
-
-        // 2) Boşsa ek (aynı tick'te, kırdıktan hemen sonra)
-        if (!hasCrop) {
-            Hand hand = null;
-            int seedSlot = -1;
-            ItemStack off = p.getOffHandStack();
-
-            if (!offBone && isUsableSeed(off, cfg)) {
-                hand = Hand.OFF_HAND;
-            } else if (!offBone && off.isEmpty()) {
-                // 2. el boş: ekini çantadan 2. ele al, ekim sonraki tick'te olur
-                int from = findSeedInInventory(inv, cfg);
-                if (from < 0) return flush(p, swing, "Çantada ekin bulunamadı!");
-                if (spend(1)) {
-                    int slot = from < 9 ? from + 36 : from;
-                    im.clickSlot(p.playerScreenHandler.syncId, slot, 40, SlotActionType.SWAP, p);
-                }
-                return flush(p, swing, notice);
-            } else {
-                seedSlot = findSeedInHotbar(inv, cfg, brokenBlock);
-                if (seedSlot < 0) return flush(p, swing, "Ekin yok! (2. ele ya da hotbara koy)");
-                hand = Hand.MAIN_HAND;
-            }
-
-            int cost = 1 + (hand == Hand.MAIN_HAND && serverSlot != seedSlot ? 2 : 0);
-            if (!spend(cost)) return flush(p, swing, notice);
-            if (hand == Hand.MAIN_HAND) select(p, inv, seedSlot);
-            BlockHitResult place = new BlockHitResult(
-                    Vec3d.ofCenter(farm).add(0.0, 0.4375, 0.0), Direction.UP, farm, false);
-            ActionResult r = im.interactBlock(p, hand, place);
-            if (hand == Hand.MAIN_HAND) serverSlot = seedSlot;
-            if (!r.isAccepted()) return flush(p, swing, notice);
-            swing = true;
-            planted = true;
-        }
-
-        // 3) Kemik tozu: yeni ektiysek 2 kez (kesin gerekli), sonraki tick'lerde 1 kez
-        if (bone < 0 && !offBone) return flush(p, swing, "Kemik tozu yok! (hotbara ya da 2. ele koy)");
-        int n = planted ? 2 : 1;
-        Hand boneHand = offBone ? Hand.OFF_HAND : Hand.MAIN_HAND;
-        int cost = n + (!offBone && serverSlot != bone ? 2 : 0);
-        if (!spend(cost)) return flush(p, swing, notice);
-        if (!offBone) select(p, inv, bone);
-        BlockHitResult bh = new BlockHitResult(Vec3d.ofCenter(crop), Direction.UP, crop, false);
-        for (int i = 0; i < n; i++) {
-            im.interactBlock(p, boneHand, bh);
-        }
-        if (!offBone) serverSlot = bone;
-        return flush(p, true, notice);
-    }
-
-    /** Tick başına tek el sallama (paket tasarrufu). */
-    private static String flush(ClientPlayerEntity p, boolean swing, String notice) {
-        if (swing && spend(1)) p.swingHand(Hand.MAIN_HAND);
-        return notice;
-    }
-
-    /** Slotu seç ve sunucuya bildir. attackBlock slotu kendisi senkronlamıyor, bu yüzden elle gönderiyoruz. */
-    private static void select(ClientPlayerEntity p, PlayerInventory inv, int slot) {
-        inv.selectedSlot = slot;
-        if (serverSlot != slot) {
-            p.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(slot));
-            serverSlot = slot;
-        }
+        return best;
     }
 
     private static boolean isUsableSeed(ItemStack s, AutoFarmConfig cfg) {
         return !s.isEmpty() && s.getItem() instanceof BlockItem bi
                 && bi.getBlock() instanceof CropBlock && cfg.isSelected(bi.getBlock());
-    }
-
-    private static int findSeedInInventory(PlayerInventory inv, AutoFarmConfig cfg) {
-        for (int i = 0; i < 36; i++) {
-            if (isUsableSeed(inv.getStack(i), cfg)) return i;
-        }
-        return -1;
-    }
-
-    /** Hotbarda seçili ekinlerden birini bul; kırdığımız ekinle aynı olanı tercih et. */
-    private static int findSeedInHotbar(PlayerInventory inv, AutoFarmConfig cfg, Block preferred) {
-        int any = -1;
-        for (int i = 0; i < 9; i++) {
-            ItemStack s = inv.getStack(i);
-            if (!isUsableSeed(s, cfg)) continue;
-            if (((BlockItem) s.getItem()).getBlock() == preferred) return i;
-            if (any < 0) any = i;
-        }
-        return any;
     }
 
     private static int fortune(ItemStack stack) {
