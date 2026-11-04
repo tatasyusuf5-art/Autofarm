@@ -7,20 +7,17 @@ jobs:
     steps:
       - name: checkout repository
         uses: actions/checkout@v4
-      - name: autofarm-mod.zip varsa aç
-        run: |
-          if [ -f autofarm-mod.zip ]; then
-            unzip -oq autofarm-mod.zip -d .
-          fi
       - name: setup jdk 21
         uses: actions/setup-java@v4
         with:
           java-version: 21
           distribution: 'microsoft'
-      - name: make gradle wrapper executable
-        run: chmod +x ./gradlew
+      - name: setup gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
       - name: build
-        run: ./gradlew build
+        run: gradle build --no-daemon
       - name: capture build artifacts
         uses: actions/upload-artifact@v4
         with:
