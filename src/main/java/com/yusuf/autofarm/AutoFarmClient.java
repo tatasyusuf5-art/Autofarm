@@ -1,40 +1,6 @@
 package com.yusuf.autofarm;
 
 import com.mojang.brigadier.arguments.IntegerArgumentType;
-import net.fabricmc.api.ClientModInitializer;
-import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
-import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.block.CropBlock;
-import net.minecraft.block.NetherWartBlock;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.client.util.InputUtil;
-import net.minecraft.client.world.ClientWorld;
-import net.minecraft.component.type.ItemEnchantmentsComponent;
-import net.minecraft.enchantment.Enchantment;
-import net.minecraft.enchantment.Enchantments;
-import net.minecraft.entity.ItemEntity;
-import net.minecraft.item.BlockItem;
-import net.minecraft.item.ItemStack;
-import net.minecraft.registry.entry.RegistryEntry;
-import net.minecraft.registry.tag.FluidTags;
-import net.minecraft.registry.tag.ItemTags;
-import net.minecraft.screen.slot.SlotActionType;
-import net.minecraft.text.Text;
-import net.minecraft.util.ActionResult;
-import net.minecraft.util.Hand;
-import net.minecraft.util.hit.BlockHitResult;
-import net.minecraft.util.hit.HitResult;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
-
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -44,801 +10,763 @@ import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
+import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.minecraft.util.Hand;
+import net.minecraft.util.ActionResult;
+import net.minecraft.entity.ItemEntity;
+import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.item.BlockItem;
+import net.minecraft.item.ItemStack;
+import net.minecraft.enchantment.Enchantment;
+import net.minecraft.enchantment.Enchantments;
+import net.minecraft.block.Blocks;
+import net.minecraft.block.Block;
+import net.minecraft.block.CropBlock;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Box;
+import net.minecraft.block.NetherWartBlock;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.text.Text;
+import net.minecraft.block.BlockState;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.registry.tag.FluidTags;
+import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.client.util.InputUtil;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.client.world.ClientWorld;
+import net.minecraft.registry.entry.RegistryEntry;
+import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.component.type.ItemEnchantmentsComponent;
+import net.minecraft.util.hit.HitResult;
 
-/**
- * Legit yardımcı otomasyon — SÜREKLİ YÜRÜYÜŞ modeli:
- * Karakter satır boyunca HİÇ DURMADAN yürür; yürürken reach menziline giren
- * her olgun ekini / boş tarlayı anında kırar-eker (tek tek nişan alıp durmaz).
- * Yürüme ve eylem birbirinden bağımsız iki ayrı sistemdir: hareket asla eylem
- * yüzünden kesilmez.
- *
- * Tuşlar: varsayılan G = aç/kapat, R + G = ayar menüsü (menüden değiştirilebilir).
- */
 public class AutoFarmClient implements ClientModInitializer {
-    private static final int SEARCH_RADIUS = 14;
-    private static final int PATH_RANGE = 28;
-    private static final int MAX_EXPANSIONS = 2500;
-    private static final int[][] DIRS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+   private static final int SEARCH_RADIUS = 12;
+   private static final double WALK_STOP = 3.0;
+   private static final double PLANT_STRICT = 0.3;
+   private static final double PLANT_RELAXED = 0.9;
+   private static final int AIM_TICKS = 1;
+   private static final int TARGET_TIMEOUT = 400;
+   private static final int MAX_EXPANSIONS = 3000;
+   private static final int PATH_RANGE = 24;
+   private static final String[] MODE_NAMES = new String[]{"1: Kır (olgun ekinleri kırar)", "2: Ek (boş tarlaları eker)", "3: Kır + Ek (kırar ve geri eker)", "4: Kemik tozu (baktığın blok: ek + toz + kır)"};
+   private static final int[][] DIRS = new int[][]{{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+   private final AutoFarmConfig cfg = AutoFarmConfig.get();
+   private boolean enabled = false;
+   private boolean openGui = false;
+   private boolean prevG = false;
+   private boolean announce = true;
+   private BlockPos targetPos;
+   private AutoFarmClient.Kind targetKind;
+   private ItemEntity targetItem;
+   private int targetTicks;
+   private int aimedTicks;
+   private int actionCooldown;
+   private int tickCounter;
+   private int warnCooldown;
+   private boolean keysHeld;
+   private List<BlockPos> path;
+   private int pathIdx;
+   private int replans;
+   private double approach = 0.3;
+   private final Map<BlockPos, Integer> blacklist = new HashMap<>();
+   private final Map<BlockPos, Integer> replant = new HashMap<>();
+   private final Set<Integer> ignoredItems = new HashSet<>();
 
-    private static final String[] MODE_NAMES = {
-            "1: Kır (olgun ekinleri kırar)",
-            "2: Ek (boş tarlaları eker)",
-            "3: Kır + Ek (kırdığını geri eker)",
-            "4: Kır + Ek + Ek (kırdığını eker, ayrıca boş tarlaları da eker)"
-    };
+   public void onInitializeClient() {
+      this.cfg.load();
+      ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
+      ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(
+         ClientCommandManager.literal("autofarm")
+            .executes(ctx -> {
+               this.toggle(MinecraftClient.getInstance());
+               return 1;
+            })
+            .then(ClientCommandManager.literal("gui").executes(ctx -> {
+               this.openGui = true;
+               return 1;
+            }))
+            .then(ClientCommandManager.literal("mode").then(
+               ClientCommandManager.argument("n", IntegerArgumentType.integer(1, MODE_NAMES.length)).executes(ctx -> {
+                  this.cfg.mode = IntegerArgumentType.getInteger(ctx, "n") - 1;
+                  this.cfg.save();
+                  this.resetState(MinecraftClient.getInstance());
+                  this.say(MinecraftClient.getInstance(), "Mod -> " + MODE_NAMES[this.cfg.mode]);
+                  return 1;
+               })))
+            .then(ClientCommandManager.literal("speed").then(
+               ClientCommandManager.argument("n", IntegerArgumentType.integer(1, 15)).executes(ctx -> {
+                  this.cfg.speed = IntegerArgumentType.getInteger(ctx, "n");
+                  this.cfg.save();
+                  this.say(MinecraftClient.getInstance(), "Hız -> " + this.cfg.speed + "/15");
+                  return 1;
+               })))
+      ));
+   }
 
-    private final AutoFarmConfig cfg = AutoFarmConfig.get();
+   public boolean isEnabled() {
+      return this.enabled;
+   }
 
-    private boolean enabled = false;
-    private boolean openGui = false;
-    private boolean prevToggle = false;
-    private boolean announce = true;
+   public void toggle(MinecraftClient mc) {
+      this.enabled = !this.enabled;
+      this.resetState(mc);
+      String msg = "AutoFarm " + (this.enabled ? "AÇIK" : "KAPALI") + " | Mod " + MODE_NAMES[this.cfg.mode];
+      this.say(mc, msg);
+      if (mc.player != null) {
+         mc.player.sendMessage(Text.literal("[AutoFarm] " + msg), false);
+      }
+   }
 
-    private int actionCooldown, tickCounter, warnCooldown;
-    private boolean keysHeld;
+   private void resetState(MinecraftClient mc) {
+      this.clearTarget();
+      this.blacklist.clear();
+      this.replant.clear();
+      this.ignoredItems.clear();
+      this.releaseKeys(mc);
+   }
 
-    // Yürüyüş hedefi: eylemlerden tamamen bağımsız, sürekli ilerleme noktası.
-    private BlockPos walkTarget;
-    private List<BlockPos> path;
-    private int pathIdx;
+   private void say(MinecraftClient mc, String msg) {
+      if (mc.player != null) {
+         mc.player.sendMessage(Text.literal(msg), true);
+      }
+   }
 
-    private final Map<BlockPos, Integer> blacklist = new HashMap<>();
-    private final Map<BlockPos, Integer> replant = new HashMap<>();
-    private final Set<Integer> ignoredItems = new HashSet<>();
+   private void warn(MinecraftClient mc, String msg) {
+      if (this.warnCooldown == 0) {
+         this.say(mc, msg);
+         this.warnCooldown = 40;
+      }
+   }
 
-    // Tarla rotası (boustrophedon sıralı hücre listesi, aktif kat için).
-    private List<BlockPos> route;
-    private int routeIdx;
-    private int currentFloor;
-    private float cruiseYaw = 0f;   // serbest modda (tarla kaydı yokken) yürüyüş yönü
+   private float lookStep() {
+      return 9.0F * this.cfg.speed;
+   }
 
-    @Override
-    public void onInitializeClient() {
-        cfg.load();
+   private int actionDelay() {
+      return this.cfg.speed >= 10 ? 0 : Math.max(1, 6 - this.cfg.speed / 2);
+   }
 
-        ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
+   private void onTick(MinecraftClient mc) {
+      this.tickCounter++;
+      if (this.announce && mc.player != null && mc.world != null) {
+         this.announce = false;
+         mc.player.sendMessage(Text.literal("[AutoFarm] Yüklendi. G = aç/kapat, R + G = menü, ya da /autofarm gui"), false);
+      }
 
-        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
-                dispatcher.register(ClientCommandManager.literal("autofarm")
-                        .executes(ctx -> {
-                            toggle(MinecraftClient.getInstance());
-                            return 1;
-                        })
-                        .then(ClientCommandManager.literal("gui")
-                                .executes(ctx -> {
-                                    openGui = true;
-                                    return 1;
-                                }))
-                        .then(ClientCommandManager.literal("mode")
-                                .then(ClientCommandManager.argument("n", IntegerArgumentType.integer(1, 4))
-                                        .executes(ctx -> {
-                                            cfg.mode = IntegerArgumentType.getInteger(ctx, "n") - 1;
-                                            cfg.save();
-                                            resetState(MinecraftClient.getInstance());
-                                            say(MinecraftClient.getInstance(), "Mod -> " + MODE_NAMES[cfg.mode]);
-                                            return 1;
-                                        })))
-                        .then(ClientCommandManager.literal("speed")
-                                .then(ClientCommandManager.argument("n", IntegerArgumentType.integer(1, 15))
-                                        .executes(ctx -> {
-                                            cfg.speed = IntegerArgumentType.getInteger(ctx, "n");
-                                            cfg.save();
-                                            say(MinecraftClient.getInstance(), "Hız -> " + cfg.speed + "/15");
-                                            return 1;
-                                        })))
-                        .then(ClientCommandManager.literal("corner")
-                                .then(ClientCommandManager.argument("n", IntegerArgumentType.integer(1, 2))
-                                        .executes(ctx -> {
-                                            saveFieldCorner(MinecraftClient.getInstance(),
-                                                    IntegerArgumentType.getInteger(ctx, "n") - 1);
-                                            return 1;
-                                        })))
-                        .then(ClientCommandManager.literal("clearfield")
-                                .executes(ctx -> {
-                                    cfg.fieldSet = false;
-                                    cfg.save();
-                                    say(MinecraftClient.getInstance(), "Tarla sınırı temizlendi.");
-                                    return 1;
-                                }))
-                        .then(ClientCommandManager.literal("floors")
-                                .then(ClientCommandManager.argument("n", IntegerArgumentType.integer(1, 64))
-                                        .executes(ctx -> {
-                                            cfg.floors = IntegerArgumentType.getInteger(ctx, "n");
-                                            cfg.save();
-                                            say(MinecraftClient.getInstance(), "Kat sayısı -> " + cfg.floors);
-                                            return 1;
-                                        })))
-                        .then(ClientCommandManager.literal("lane")
-                                .then(ClientCommandManager.argument("n", IntegerArgumentType.integer(1, 16))
-                                        .executes(ctx -> {
-                                            cfg.laneSpacing = IntegerArgumentType.getInteger(ctx, "n");
-                                            cfg.save();
-                                            route = null;
-                                            say(MinecraftClient.getInstance(), "Şerit aralığı -> " + cfg.laneSpacing);
-                                            return 1;
-                                        })))
-                        .then(ClientCommandManager.literal("godmode")
-                                .executes(ctx -> {
-                                    cfg.godMode = !cfg.godMode;
-                                    cfg.save();
-                                    say(MinecraftClient.getInstance(),
-                                            "Godmode " + (cfg.godMode ? "AÇIK" : "KAPALI"));
-                                    return 1;
-                                }))));
-    }
+      boolean g = false;
+      boolean r = false;
+      if (mc.currentScreen == null && mc.player != null) {
+         long window = mc.getWindow().getHandle();
+         g = InputUtil.isKeyPressed(window, 71);
+         r = InputUtil.isKeyPressed(window, 82);
+      }
 
-    // ------------------------------------------------------------------ kontrol
+      if (g && !this.prevG) {
+         if (r) {
+            this.openGui = true;
+         } else {
+            this.toggle(mc);
+         }
+      }
 
-    public boolean isEnabled() {
-        return enabled;
-    }
+      this.prevG = g;
+      if (this.openGui && mc.player != null && mc.currentScreen == null) {
+         this.openGui = false;
+         this.releaseKeys(mc);
+         mc.setScreen(new AutoFarmScreen(this));
+      } else {
+         if (this.warnCooldown > 0) {
+            this.warnCooldown--;
+         }
 
-    public void toggle(MinecraftClient mc) {
-        enabled = !enabled;
-        resetState(mc);
-        String msg = "AutoFarm " + (enabled ? "AÇIK" : "KAPALI") + " | Mod " + MODE_NAMES[cfg.mode];
-        say(mc, msg);
-        if (mc.player != null) {
-            mc.player.sendMessage(Text.literal("[AutoFarm] " + msg), false);
-        }
-    }
+         if (this.actionCooldown > 0) {
+            this.actionCooldown--;
+         }
 
-    public void saveFieldCorner(MinecraftClient mc, int idx) {
-        if (mc.player == null) return;
-        HitResult hr = mc.player.raycast(mc.player.getBlockInteractionRange() + 4.0, 1.0f, false);
-        BlockPos pos;
-        if (hr instanceof BlockHitResult b && b.getType() == HitResult.Type.BLOCK) {
-            pos = b.getBlockPos();
-        } else {
-            pos = feetCell(mc.player);
-        }
-        cfg.setFieldCorner(idx, pos);
-        cfg.fieldSet = true;
-        cfg.save();
-        route = null;
-        say(mc, (idx == 0 ? "1." : "2.") + " köşe kaydedildi: " + pos.toShortString());
-        mc.player.sendMessage(Text.literal("[AutoFarm] " + (idx == 0 ? "1." : "2.")
-                + " köşe kaydedildi: " + pos.toShortString()), false);
-    }
+         if (this.enabled && mc.player != null && mc.world != null && mc.interactionManager != null && mc.currentScreen == null && !mc.player.isSpectator()) {
+            if (this.tickCounter % 40 == 0) {
+               this.blacklist.values().removeIf(t -> t < this.tickCounter);
+               this.replant.values().removeIf(t -> t < this.tickCounter);
+            }
 
-    private void resetState(MinecraftClient mc) {
-        blacklist.clear();
-        replant.clear();
-        ignoredItems.clear();
-        route = null;
-        routeIdx = 0;
-        currentFloor = 0;
-        path = null;
-        walkTarget = null;
-        releaseKeys(mc);
-    }
+            if (this.tickCounter % 1200 == 0) {
+               this.ignoredItems.clear();
+            }
 
-    private void say(MinecraftClient mc, String msg) {
-        if (mc.player != null) {
-            mc.player.sendMessage(Text.literal(msg), true);
-        }
-    }
+            if (this.cfg.mode == 3) {
+               this.releaseKeys(mc);
+               String lookMsg = LookFarm.tick(mc, this.cfg);
+               if (lookMsg != null) {
+                  this.warn(mc, lookMsg);
+               }
 
-    private void warn(MinecraftClient mc, String msg) {
-        if (warnCooldown == 0) {
-            say(mc, msg);
-            warnCooldown = 40;
-        }
-    }
+               return;
+            }
 
-    private float lookStep() {
-        if (cfg.godMode) return 180f;
-        return 9f * cfg.speed;
-    }
+            boolean harvestMode = this.cfg.mode == 0 || this.cfg.mode == 2;
+            boolean plantMode = this.cfg.mode == 1 || this.cfg.mode == 2;
+            if (harvestMode) {
+               ItemStack tool = mc.player.getMainHandStack();
+               if (this.cfg.requireHoe && !tool.isIn(ItemTags.HOES)) {
+                  this.warn(mc, "Ana ele çapa al! (Çapa zorunluluğu açık)");
+                  this.releaseKeys(mc);
+                  return;
+               }
 
-    private int actionDelay() {
-        if (cfg.godMode) return 0;
-        return cfg.speed >= 10 ? 0 : Math.max(1, 4 - cfg.speed / 4);
-    }
+               if (this.cfg.requireFortune && fortuneLevel(tool) < 3) {
+                  this.warn(mc, "Ana elde Servet III alet olmalı! (Servet III zorunluluğu açık)");
+                  this.releaseKeys(mc);
+                  return;
+               }
+            }
 
-    // ------------------------------------------------------------------ ana döngü
+            Hand plantHand = null;
+            Block plantBlock = null;
+            if (plantMode) {
+               plantHand = this.findPlantHand(mc, this.cfg.mode == 1);
+               if (plantHand == null) {
+                  this.supply(mc);
+                  this.releaseKeys(mc);
+                  return;
+               }
 
-    private void onTick(MinecraftClient mc) {
-        tickCounter++;
+               plantBlock = ((BlockItem)mc.player.getStackInHand(plantHand).getItem()).getBlock();
+            }
 
-        if (announce && mc.player != null && mc.world != null) {
-            announce = false;
-            mc.player.sendMessage(Text.literal(
-                    "[AutoFarm] Yüklendi. " + keyName(cfg.keyToggle) + " = aç/kapat, "
-                            + keyName(cfg.keyMenu) + " + " + keyName(cfg.keyToggle)
-                            + " = menü, ya da /autofarm gui"), false);
-        }
+            if (this.targetKind != null && !this.targetStillValid(mc, plantBlock)) {
+               this.clearTarget();
+            }
 
-        boolean t = false;
-        boolean m = false;
-        if (mc.currentScreen == null && mc.player != null) {
-            long window = mc.getWindow().getHandle();
-            t = InputUtil.isKeyPressed(window, cfg.keyToggle);
-            m = InputUtil.isKeyPressed(window, cfg.keyMenu);
-        }
-        if (t && !prevToggle) {
-            if (m) {
-                openGui = true;
+            if (this.targetKind == null) {
+               this.findTarget(mc, plantBlock);
+               if (this.targetKind == null) {
+                  this.releaseKeys(mc);
+                  return;
+               }
+            }
+
+            if (++this.targetTicks > 400) {
+               this.releaseKeys(mc);
+               this.giveUp();
             } else {
-                toggle(mc);
+               this.step(mc, plantHand, plantBlock);
             }
-        }
-        prevToggle = t;
+         } else {
+            this.releaseKeys(mc);
+         }
+      }
+   }
 
-        if (openGui && mc.player != null && mc.currentScreen == null) {
-            openGui = false;
-            releaseKeys(mc);
-            mc.setScreen(new AutoFarmScreen(this));
-            return;
-        }
-
-        if (warnCooldown > 0) warnCooldown--;
-        if (actionCooldown > 0) actionCooldown--;
-
-        if (!enabled || mc.player == null || mc.world == null || mc.interactionManager == null
-                || mc.currentScreen != null || mc.player.isSpectator()) {
-            releaseKeys(mc);
-            return;
-        }
-
-        if (tickCounter % 40 == 0) {
-            blacklist.values().removeIf(v -> v < tickCounter);
-            replant.values().removeIf(v -> v < tickCounter);
-        }
-        if (tickCounter % 1200 == 0) ignoredItems.clear();
-
-        boolean harvestMode = cfg.mode == 0 || cfg.mode == 2 || cfg.mode == 3;
-        boolean plantMode = cfg.mode == 1 || cfg.mode == 2 || cfg.mode == 3;
-        boolean plantFreeTiles = cfg.mode == 1 || cfg.mode == 3;
-
-        if (harvestMode) {
-            ItemStack tool = mc.player.getMainHandStack();
-            if (cfg.requireHoe && !tool.isIn(ItemTags.HOES)) {
-                warn(mc, "Ana ele çapa al! (Çapa zorunluluğu açık)");
-                releaseKeys(mc);
-                return;
-            }
-            if (cfg.requireFortune && fortuneLevel(tool) < 3) {
-                warn(mc, "Ana elde Servet III alet olmalı! (Servet III zorunluluğu açık)");
-                releaseKeys(mc);
-                return;
-            }
-        }
-
-        Hand plantHand = null;
-        Block plantBlock = null;
-        if (plantMode) {
-            plantHand = findPlantHand(mc, cfg.mode == 1);
-            if (plantHand == null) {
-                supply(mc);
-                // Ekin yoksa bile yürümeyi durdurma, sadece ekimi atla.
-                plantMode = false;
-                plantFreeTiles = false;
+   private void step(MinecraftClient mc, Hand plantHand, Block plantBlock) {
+      ClientPlayerEntity p = mc.player;
+      if (this.targetKind == AutoFarmClient.Kind.ITEM) {
+         Vec3d ip = this.targetItem.getPos();
+         this.lookAt(p, ip.add(0.0, 0.1, 0.0));
+         double hd = Math.hypot(ip.x - p.getX(), ip.z - p.getZ());
+         if (hd <= 0.6) {
+            this.releaseKeys(mc);
+         } else {
+            this.navigate(mc, ip, AutoFarmClient.Kind.ITEM, 0.6);
+         }
+      } else {
+         Vec3d aim = aimPoint(this.targetPos, this.targetKind);
+         this.lookAt(p, aim);
+         double eyeDist = p.getEyePos().distanceTo(aim);
+         double hd = Math.hypot(p.getX() - aim.x, p.getZ() - aim.z);
+         boolean inReach = eyeDist <= 3.0;
+         boolean standOk = this.targetKind == AutoFarmClient.Kind.HARVEST ? inReach : hd <= this.approach;
+         BlockHitResult bhr = null;
+         boolean ok = false;
+         if (inReach && p.raycast(p.getBlockInteractionRange(), 1.0F, false) instanceof BlockHitResult b && b.getType() == HitResult.Type.BLOCK) {
+            bhr = b;
+            if (this.targetKind == AutoFarmClient.Kind.HARVEST) {
+               ok = b.getBlockPos().equals(this.targetPos);
             } else {
-                plantBlock = ((BlockItem) mc.player.getStackInHand(plantHand).getItem()).getBlock();
+               ok = b.getBlockPos().equals(this.targetPos.down()) && b.getSide() == Direction.UP;
             }
-        }
 
-        // 1) EYLEM: reach içindeki tüm uygun blokları tara ve anında işle (yürüyüşten bağımsız).
-        actOnNearbyCells(mc, harvestMode, plantMode, plantFreeTiles, plantHand, plantBlock);
-        actOnNearbyItems(mc, harvestMode);
+            if (!ok) {
+               BlockPos hp = b.getBlockPos();
+               BlockState hs = mc.world.getBlockState(hp);
+               boolean harvestMode = this.cfg.mode == 0 || this.cfg.mode == 2;
+               if (this.sameLevel(mc, hp) && harvestMode && isMature(hs) && this.cfg.isSelected(hs.getBlock()) && !this.blacklist.containsKey(hp)) {
+                  this.targetPos = hp.toImmutable();
+                  this.targetKind = AutoFarmClient.Kind.HARVEST;
+                  ok = true;
+               } else if (plantBlock != null && b.getSide() == Direction.UP) {
+                  BlockPos above = hp.up();
+                  if (this.sameLevel(mc, above)
+                     && mc.world.getBlockState(above).isAir()
+                     && (this.cfg.mode == 1 || this.replant.containsKey(above))
+                     && plantBlock.getDefaultState().canPlaceAt(mc.world, above)) {
+                     this.targetPos = above.toImmutable();
+                     this.targetKind = AutoFarmClient.Kind.PLANT;
+                     ok = true;
+                  }
+               }
+            }
+         }
 
-        // 2) YÜRÜYÜŞ: her zaman devam eder, eylem beklemez.
-        walk(mc);
-    }
+         if (!ok && !standOk) {
+            this.aimedTicks = 0;
+            if (this.targetKind == AutoFarmClient.Kind.HARVEST) {
+               this.navigate(mc, aim, AutoFarmClient.Kind.HARVEST, 3.0);
+            } else {
+               this.navigate(mc, aim, AutoFarmClient.Kind.PLANT, this.approach);
+            }
+         } else {
+            this.releaseKeys(mc);
+            if (!ok) {
+               this.aimedTicks = 0;
+            } else if (++this.aimedTicks >= 1 && this.actionCooldown <= 0) {
+               if (this.targetKind == AutoFarmClient.Kind.HARVEST) {
+                  mc.interactionManager.attackBlock(this.targetPos, bhr.getSide());
+                  p.swingHand(Hand.MAIN_HAND);
+                  if (this.cfg.mode == 2) {
+                     this.replant.put(this.targetPos.toImmutable(), this.tickCounter + 100);
+                  }
+               } else {
+                  ActionResult r = mc.interactionManager.interactBlock(p, plantHand, bhr);
+                  if (r.isAccepted()) {
+                     p.swingHand(plantHand);
+                     this.replant.remove(this.targetPos);
+                  } else {
+                     this.blacklist.put(this.targetPos.toImmutable(), this.tickCounter + 200);
+                  }
+               }
 
-    private static String keyName(int code) {
-        return InputUtil.fromKeyCode(code, 0).getLocalizedText().getString();
-    }
+               this.actionCooldown = this.actionDelay();
+               this.clearTarget();
+            }
+         }
+      }
+   }
 
-    // ------------------------------------------------------------------ eylem: menzildeki her şeyi işle
+   private Hand findPlantHand(MinecraftClient mc, boolean allowMain) {
+      ClientPlayerEntity p = mc.player;
+      if (allowMain && this.isSelectedSeed(p.getMainHandStack())) {
+         return Hand.MAIN_HAND;
+      } else {
+         return this.isSelectedSeed(p.getOffHandStack()) ? Hand.OFF_HAND : null;
+      }
+   }
 
-    /**
-     * Oyuncunun gerçek blockInteractionRange'i içindeki TÜM uygun hücreleri tarar.
-     * Durmadan, nişan-kilidi beklemeden: kamerayı o hücreye çevirip ışının gerçekten
-     * değdiğini doğrular doğrulamaz hemen kırar/eker, sonra aynı tick içinde (cooldown
-     * izin verdiği sürece) bir sonrakine geçer. Bu sayede yürürken geçtiği her ekin
-     * tek tek durup nişan almadan işlenir.
-     */
-    private void actOnNearbyCells(MinecraftClient mc, boolean harvest, boolean plant,
-                                   boolean plantFree, Hand plantHand, Block plantBlock) {
-        if (actionCooldown > 0) return;
-        ClientPlayerEntity p = mc.player;
-        double reach = p.getBlockInteractionRange();
-        Vec3d eye = p.getEyePos();
-        BlockPos center = feetCell(p);
+   private void supply(MinecraftClient mc) {
+      ClientPlayerEntity p = mc.player;
+      ItemStack off = p.getOffHandStack();
+      if (!off.isEmpty() && !isSeed(off)) {
+         this.warn(mc, "2. el dolu! Ekin otomatik 2. ele alınır, eli boşalt.");
+      } else if (this.actionCooldown <= 0) {
+         for (int i = 0; i < 36; i++) {
+            if (this.isSelectedSeed(p.getInventory().getStack(i))) {
+               int slot = i < 9 ? i + 36 : i;
+               mc.interactionManager.clickSlot(p.playerScreenHandler.syncId, slot, 40, SlotActionType.SWAP, p);
+               this.actionCooldown = 10;
+               return;
+            }
+         }
 
-        // Yakındaki adaylar: mesafeye göre sıralı (en yakın önce).
-        List<BlockPos> candidates = new ArrayList<>();
-        int r = (int) Math.ceil(reach) + 1;
-        for (BlockPos pos : BlockPos.iterate(center.add(-r, -1, -r), center.add(r, 1, r))) {
-            if (blacklist.containsKey(pos)) continue;
-            if (cfg.fieldSet && !inAnyLoadedFloorRange(pos)) continue;
+         this.warn(mc, "Çantada seçili ekin bulunamadı!");
+      }
+   }
+
+   private void findTarget(MinecraftClient mc, Block plantBlock) {
+      ClientPlayerEntity p = mc.player;
+      boolean harvest = this.cfg.mode == 0 || this.cfg.mode == 2;
+      Vec3d eye = p.getEyePos();
+      BlockPos origin = p.getBlockPos();
+      double best = Double.MAX_VALUE;
+      BlockPos bestPos = null;
+      AutoFarmClient.Kind bestKind = null;
+
+      for (BlockPos pos : BlockPos.iterate(origin.add(-12, -1, -12), origin.add(12, 1, 12))) {
+         if (!this.blacklist.containsKey(pos) && this.sameLevel(mc, pos)) {
             BlockState s = mc.world.getBlockState(pos);
-            boolean isHarvestTarget = harvest && isMature(s) && cfg.isSelected(s.getBlock());
-            boolean isPlantTarget = plant && s.isAir()
-                    && (plantFree || replant.containsKey(pos))
-                    && plantBlock != null
-                    && plantBlock.getDefaultState().canPlaceAt(mc.world, pos);
-            if (!isHarvestTarget && !isPlantTarget) continue;
-
-            Vec3d aim = isHarvestTarget
-                    ? new Vec3d(pos.getX() + 0.5, pos.getY() + 0.35, pos.getZ() + 0.5)
-                    : new Vec3d(pos.getX() + 0.5, pos.getY() + 0.9375, pos.getZ() + 0.5);
-            if (eye.distanceTo(aim) > reach) continue;
-            candidates.add(pos.toImmutable());
-        }
-        if (candidates.isEmpty()) return;
-        candidates.sort(Comparator.comparingDouble(pos -> eye.squaredDistanceTo(Vec3d.ofCenter(pos))));
-
-        BlockPos pos = candidates.get(0);
-        BlockState s = mc.world.getBlockState(pos);
-        boolean isHarvestTarget = harvest && isMature(s) && cfg.isSelected(s.getBlock());
-        Vec3d aim = isHarvestTarget
-                ? new Vec3d(pos.getX() + 0.5, pos.getY() + 0.35, pos.getZ() + 0.5)
-                : new Vec3d(pos.getX() + 0.5, pos.getY() + 0.9375, pos.getZ() + 0.5);
-
-        lookAt(p, aim);
-
-        HitResult hr = p.raycast(reach, 1.0f, false);
-        if (!(hr instanceof BlockHitResult bhr) || bhr.getType() != HitResult.Type.BLOCK) return;
-
-        boolean ok;
-        if (isHarvestTarget) {
-            ok = bhr.getBlockPos().equals(pos);
-        } else {
-            ok = bhr.getBlockPos().equals(pos.down()) && bhr.getSide() == Direction.UP;
-        }
-        if (!ok) return;   // ışın henüz tam değmedi; bir sonraki tick tekrar dener (yürürken de olur)
-
-        if (isHarvestTarget) {
-            mc.interactionManager.attackBlock(pos, bhr.getSide());
-            p.swingHand(Hand.MAIN_HAND);
-            if (cfg.mode == 2 || cfg.mode == 3) {
-                replant.put(pos, tickCounter + 100);
+            AutoFarmClient.Kind k = null;
+            if (harvest && isMature(s) && this.cfg.isSelected(s.getBlock())) {
+               k = AutoFarmClient.Kind.HARVEST;
+            } else if (plantBlock != null
+               && s.isAir()
+               && (this.cfg.mode == 1 || this.replant.containsKey(pos))
+               && plantBlock.getDefaultState().canPlaceAt(mc.world, pos)) {
+               k = AutoFarmClient.Kind.PLANT;
             }
-        } else {
-            ActionResult res = mc.interactionManager.interactBlock(p, plantHand, bhr);
-            if (res.isAccepted()) {
-                p.swingHand(plantHand);
-                replant.remove(pos);
-            } else {
-                blacklist.put(pos, tickCounter + 200);
+
+            if (k != null) {
+               double d = eye.squaredDistanceTo(Vec3d.ofCenter(pos));
+               if (d < best) {
+                  best = d;
+                  bestPos = pos.toImmutable();
+                  bestKind = k;
+               }
             }
-        }
-        actionCooldown = actionDelay();
-    }
+         }
+      }
 
-    private boolean inAnyLoadedFloorRange(BlockPos pos) {
-        // Tarla kaydı varsa, oyuncunun bulunduğu kata ±1 tolerans ver (basamak/kot farkları için).
-        return true; // sameLevel kontrolü zaten aşağıda ayrı yapılıyor; burada filtre gerekmiyor.
-    }
+      if (bestPos != null) {
+         this.targetPos = bestPos;
+         this.targetKind = bestKind;
+         this.targetTicks = 0;
+         this.aimedTicks = 0;
+      } else {
+         if (harvest) {
+            Box box = p.getBoundingBox().expand(10.0, 3.0, 10.0);
+            ItemEntity bestItem = null;
+            double bd = Double.MAX_VALUE;
 
-    private void actOnNearbyItems(MinecraftClient mc, boolean harvest) {
-        if (!harvest) return;
-        ClientPlayerEntity p = mc.player;
-        Box box = p.getBoundingBox().expand(2.0, 1.5, 2.0);
-        for (ItemEntity ie : mc.world.getEntitiesByClass(ItemEntity.class, box,
-                x -> !x.isRemoved() && !ignoredItems.contains(x.getId()))) {
-            // Yakındaki eşyalar oyuncunun hitbox'ına değdiğinde Minecraft zaten otomatik toplar.
-            // Burada ekstra bir şey yapmaya gerek yok; eşya toplama hareketin doğal sonucu.
-        }
-    }
+            for (ItemEntity ie : mc.world.getEntitiesByClass(ItemEntity.class, box, x -> !x.isRemoved() && !this.ignoredItems.contains(x.getId()))) {
+               double d = ie.squaredDistanceTo(p);
+               if (d < bd) {
+                  bd = d;
+                  bestItem = ie;
+               }
+            }
 
-    // ------------------------------------------------------------------ ekin elde tutma / çantadan alma
+            if (bestItem != null) {
+               this.targetItem = bestItem;
+               this.targetKind = AutoFarmClient.Kind.ITEM;
+               this.targetTicks = 0;
+               this.aimedTicks = 0;
+            }
+         }
+      }
+   }
 
-    private Hand findPlantHand(MinecraftClient mc, boolean allowMain) {
-        ClientPlayerEntity p = mc.player;
-        if (allowMain && isSelectedSeed(p.getMainHandStack())) return Hand.MAIN_HAND;
-        if (isSelectedSeed(p.getOffHandStack())) return Hand.OFF_HAND;
-        return null;
-    }
+   private boolean targetStillValid(MinecraftClient mc, Block plantBlock) {
+      return switch (this.targetKind) {
+         case HARVEST -> {
+            BlockState s = mc.world.getBlockState(this.targetPos);
+            yield isMature(s) && this.cfg.isSelected(s.getBlock());
+         }
+         case PLANT -> plantBlock != null
+            && mc.world.getBlockState(this.targetPos).isAir()
+            && plantBlock.getDefaultState().canPlaceAt(mc.world, this.targetPos);
+         case ITEM -> this.targetItem != null && !this.targetItem.isRemoved();
+      };
+   }
 
-    private void supply(MinecraftClient mc) {
-        ClientPlayerEntity p = mc.player;
-        ItemStack off = p.getOffHandStack();
-        if (!off.isEmpty() && !isSeed(off)) {
-            warn(mc, "2. el dolu! Ekin otomatik 2. ele alınır, eli boşalt.");
+   private void clearTarget() {
+      this.targetKind = null;
+      this.targetPos = null;
+      this.targetItem = null;
+      this.targetTicks = 0;
+      this.aimedTicks = 0;
+      this.path = null;
+      this.pathIdx = 0;
+      this.replans = 0;
+      this.approach = 0.3;
+   }
+
+   private void giveUp() {
+      if (this.targetKind == AutoFarmClient.Kind.ITEM && this.targetItem != null) {
+         this.ignoredItems.add(this.targetItem.getId());
+      } else if (this.targetPos != null) {
+         this.blacklist.put(this.targetPos.toImmutable(), this.tickCounter + 600);
+      }
+
+      this.clearTarget();
+   }
+
+   private static Vec3d aimPoint(BlockPos pos, AutoFarmClient.Kind kind) {
+      return kind == AutoFarmClient.Kind.HARVEST
+         ? new Vec3d(pos.getX() + 0.5, pos.getY() + 0.35, pos.getZ() + 0.5)
+         : new Vec3d(pos.getX() + 0.5, pos.getY() - 1 + 0.9375, pos.getZ() + 0.5);
+   }
+
+   private void lookAt(ClientPlayerEntity p, Vec3d target) {
+      float step = this.lookStep();
+      Vec3d eye = p.getEyePos();
+      double dx = target.x - eye.x;
+      double dy = target.y - eye.y;
+      double dz = target.z - eye.z;
+      double h = Math.sqrt(dx * dx + dz * dz);
+      float wantYaw = h < 0.5 ? p.getYaw() : (float)(Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
+      float wantPitch = (float)(-Math.toDegrees(Math.atan2(dy, h)));
+      float yawDiff = MathHelper.wrapDegrees(wantYaw - p.getYaw());
+      float pitchDiff = wantPitch - p.getPitch();
+      p.setYaw(p.getYaw() + MathHelper.clamp(yawDiff, -step, step));
+      p.setPitch(MathHelper.clamp(p.getPitch() + MathHelper.clamp(pitchDiff, -step, step), -90.0F, 90.0F));
+   }
+
+   private static BlockPos feetCell(ClientPlayerEntity p) {
+      return BlockPos.ofFloored(p.getX(), p.getY(), p.getZ());
+   }
+
+   private boolean sameLevel(MinecraftClient mc, BlockPos pos) {
+      int feetY = feetCell(mc.player).getY();
+      return pos.getY() >= feetY - 1 && pos.getY() <= feetY + 1;
+   }
+
+   private void navigate(MinecraftClient mc, Vec3d goalAim, AutoFarmClient.Kind kind, double radius) {
+      ClientPlayerEntity p = mc.player;
+      if (this.path == null) {
+         List<BlockPos> found = this.findPath(mc, goalAim, kind, radius);
+         if (found == null && kind == AutoFarmClient.Kind.PLANT && radius < 0.9) {
+            this.approach = 0.9;
+            found = this.findPath(mc, goalAim, kind, 0.9);
+         }
+
+         if (found == null) {
+            this.releaseKeys(mc);
+            this.giveUp();
             return;
-        }
-        if (actionCooldown > 0) return;
-        for (int i = 0; i < 36; i++) {
-            if (isSelectedSeed(p.getInventory().getStack(i))) {
-                int slot = i < 9 ? i + 36 : i;
-                mc.interactionManager.clickSlot(p.playerScreenHandler.syncId, slot, 40,
-                        SlotActionType.SWAP, p);
-                actionCooldown = 10;
-                return;
-            }
-        }
-        warn(mc, "Çantada seçili ekin bulunamadı!");
-    }
+         }
 
-    // ------------------------------------------------------------------ yürüyüş (eylemden bağımsız, hiç durmaz)
-
-    private void walk(MinecraftClient mc) {
-        ClientPlayerEntity p = mc.player;
-
-        if (cfg.fieldSet) {
-            walkRoute(mc);
-        } else {
-            walkCruise(mc);
-        }
-    }
-
-    /** Tarla kaydı yokken: geniş bir daire/zikzak içinde sürekli dolaşır, asla durmaz. */
-    private void walkCruise(MinecraftClient mc) {
-        ClientPlayerEntity p = mc.player;
-        if (walkTarget == null || feetCell(p).isWithinDistance(walkTarget, 1.5)
-                || !canStand(mc.world, walkTarget)) {
-            // Yeni, güvenli ve yakın bir ileri nokta seç.
-            for (int attempt = 0; attempt < 8 && walkTarget == null; attempt++) {
-                float yaw = cruiseYaw + (attempt * 25f);
-                double rad = Math.toRadians(yaw);
-                BlockPos cand = feetCell(p).add((int) Math.round(-Math.sin(rad) * 6), 0, (int) Math.round(Math.cos(rad) * 6));
-                if (canStand(mc.world, cand)) {
-                    walkTarget = cand;
-                }
-            }
-            cruiseYaw += 47f;   // bir sonraki seçimde farklı yöne baksın (sürekli tarama hissi)
-            path = null;
-        }
-        if (walkTarget == null) return;
-        navigateContinuous(mc, walkTarget);
-    }
-
-    /**
-     * Tarla kaydı varsa: boustrophedon rotadaki bir sonraki geçilmemiş hücreye doğru
-     * HİÇ DURMADAN yürür. Hedefe varınca hemen bir sonraki rota hücresine geçer;
-     * eylem (kırma/ekme) bu yürüyüşü asla bekletmez, yukarıdaki actOnNearbyCells
-     * zaten yürürken paralel çalışıyor.
-     */
-    private void walkRoute(MinecraftClient mc) {
-        if (route == null) {
-            buildRoute(mc);
-            routeIdx = 0;
-        }
-        if (route == null || route.isEmpty()) return;
-
-        ClientPlayerEntity p = mc.player;
-        BlockPos feet = feetCell(p);
-
-        // Mevcut hedefe yeterince yaklaştıysak bir sonrakine geç (asla tam durmadan).
-        while (routeIdx < route.size() && feet.isWithinDistance(route.get(routeIdx), 1.2)) {
-            routeIdx++;
-        }
-        if (routeIdx >= route.size()) {
-            currentFloor++;
-            if (currentFloor >= cfg.floors) {
-                releaseKeys(mc);
-                return;   // tüm katlar tamamlandı
-            }
-            route = null;
-            buildRoute(mc);
-            routeIdx = 0;
-            path = null;
-            if (route == null || route.isEmpty()) return;
-        }
-
-        BlockPos goal = route.get(routeIdx);
-        navigateContinuous(mc, goal);
-    }
-
-    /**
-     * Düz şeritler halinde rota: her satırı tek tek gezmek yerine, reach menzili
-     * iki yana da ulaştığı için cfg.laneSpacing (varsayılan 9) blok aralıkla
-     * şeritler oluşturur. Oyuncu bir şeridi düz yürür, şerit bitince laneSpacing
-     * kadar yana kayar ve ters yönde bir sonraki şeridi yürür (boustrophedon).
-     * Aradaki bloklar reach menziliyle iki taraftan taranmış olur.
-     */
-    private void buildRoute(MinecraftClient mc) {
-        int minX = Math.min(cfg.fx1, cfg.fx2), maxX = Math.max(cfg.fx1, cfg.fx2);
-        int minZ = Math.min(cfg.fz1, cfg.fz2), maxZ = Math.max(cfg.fz1, cfg.fz2);
-        int y = cfg.baseFloorY() + currentFloor;
-        int lane = Math.max(1, cfg.laneSpacing);
-
-        List<BlockPos> list = new ArrayList<>();
-        boolean reverse = false;
-        for (int x = minX; x <= maxX; x += lane) {
-            if (!reverse) {
-                for (int z = minZ; z <= maxZ; z++) list.add(new BlockPos(x, y, z));
-            } else {
-                for (int z = maxZ; z >= minZ; z--) list.add(new BlockPos(x, y, z));
-            }
-            reverse = !reverse;
-        }
-        // Son şerit tarlanın sağ/sol ucunu tam kapsamıyorsa (lane maxX'e tam bölünmezse),
-        // kenarın atlanmaması için son X sütununu da ayrı bir şerit olarak ekle.
-        int lastLaneX = minX + ((maxX - minX) / lane) * lane;
-        if (lastLaneX != maxX) {
-            if (!reverse) {
-                for (int z = minZ; z <= maxZ; z++) list.add(new BlockPos(maxX, y, z));
-            } else {
-                for (int z = maxZ; z >= minZ; z--) list.add(new BlockPos(maxX, y, z));
-            }
-        }
-        route = list;
-    }
-
-    /**
-     * Hedefe doğru KESİNTİSİZ yürür: önce düz-çizgi hızlı yol dener (A* yok,
-     * duraksama yok); gerçekten engele takılırsa A* ile etrafından dolanır.
-     * Her iki durumda da yürüme tuşları sürekli basılı kalır, "dur-nişan al-yürü"
-     * döngüsü yoktur.
-     */
-    private void navigateContinuous(MinecraftClient mc, BlockPos goal) {
-        ClientPlayerEntity p = mc.player;
-        Vec3d goalCenter = new Vec3d(goal.getX() + 0.5, p.getY(), goal.getZ() + 0.5);
-
-        if (path == null) {
-            if (straightLineClear(mc, goalCenter)) {
-                lookAt(p, goalCenter);
-                moveToward(mc, goalCenter.x, goalCenter.z, false);
-                return;
-            }
-            List<BlockPos> found = findPath(mc, goal);
-            if (found == null) {
-                blacklist.put(goal, tickCounter + 300);
-                path = null;
-                if (cfg.fieldSet) routeIdx++;
-                else walkTarget = null;
-                return;
-            }
-            path = found;
-            pathIdx = found.size() > 1 ? 1 : 0;
-        }
-
-        if (pathIdx >= path.size()) {
-            path = null;
+         this.path = found;
+         this.pathIdx = found.size() > 1 ? 1 : 0;
+         if (++this.replans > 4) {
+            this.releaseKeys(mc);
+            this.giveUp();
             return;
-        }
-        BlockPos wp = path.get(pathIdx);
-        double cx = wp.getX() + 0.5;
-        double cz = wp.getZ() + 0.5;
-        double d = Math.hypot(cx - p.getX(), cz - p.getZ());
+         }
+      }
 
-        if (d < 1.0 && Math.abs(p.getY() - wp.getY()) < 1.6) {
-            pathIdx++;
-            if (pathIdx >= path.size()) {
-                path = null;
-                return;
+      if (this.pathIdx >= this.path.size()) {
+         this.path = null;
+         this.releaseKeys(mc);
+      } else {
+         BlockPos wp = this.path.get(this.pathIdx);
+         double cx = wp.getX() + 0.5;
+         double cz = wp.getZ() + 0.5;
+         double d = Math.hypot(cx - p.getX(), cz - p.getZ());
+         if (d < 0.5 && Math.abs(p.getY() - wp.getY()) < 1.6) {
+            this.pathIdx++;
+            if (this.pathIdx >= this.path.size()) {
+               this.path = null;
+               this.releaseKeys(mc);
+               return;
             }
-            wp = path.get(pathIdx);
+
+            wp = this.path.get(this.pathIdx);
             cx = wp.getX() + 0.5;
             cz = wp.getZ() + 0.5;
-        }
+         } else if (d > 3.5) {
+            this.path = null;
+            this.releaseKeys(mc);
+            return;
+         }
 
-        boolean needsClimb = wp.getY() > feetCell(p).getY();
-        boolean jump = needsClimb && p.isOnGround() && p.horizontalCollision;
-        lookAt(p, new Vec3d(cx, p.getEyeY(), cz));
-        moveToward(mc, cx, cz, jump);
-    }
+         boolean needsClimb = wp.getY() > feetCell(p).getY();
+         boolean jump = needsClimb && p.isOnGround() && p.horizontalCollision;
+         this.moveToward(mc, cx, cz, jump);
+      }
+   }
 
-    private boolean straightLineClear(MinecraftClient mc, Vec3d goalAim) {
-        ClientPlayerEntity p = mc.player;
-        ClientWorld w = mc.world;
-        BlockPos start = feetCell(p);
-        BlockPos end = BlockPos.ofFloored(goalAim.x, p.getY(), goalAim.z);
-        if (start.equals(end)) return true;
+   private void moveToward(MinecraftClient mc, double tx, double tz, boolean jump) {
+      ClientPlayerEntity p = mc.player;
+      double dx = tx - p.getX();
+      double dz = tz - p.getZ();
+      float moveYaw = (float)(Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
+      float rel = MathHelper.wrapDegrees(moveYaw - p.getYaw());
+      boolean f = Math.abs(rel) < 67.5F;
+      boolean b = Math.abs(rel) > 112.5F;
+      boolean r = rel > 22.5F && rel < 157.5F;
+      boolean l = rel < -22.5F && rel > -157.5F;
+      this.setKeys(mc, f, b, l, r, jump);
+   }
 
-        double dx = end.getX() - start.getX();
-        double dz = end.getZ() - start.getZ();
-        double dist = Math.hypot(dx, dz);
-        if (dist > 10) return false;
-        int steps = (int) Math.ceil(dist);
-        for (int i = 1; i <= steps; i++) {
-            double t = (double) i / steps;
-            BlockPos probe = BlockPos.ofFloored(start.getX() + dx * t + 0.5, start.getY(), start.getZ() + dz * t + 0.5);
-            if (!canStand(w, probe)) return false;
-            if (Math.abs(probe.getY() - start.getY()) > 0) return false;
-        }
-        return true;
-    }
+   private void setKeys(MinecraftClient mc, boolean f, boolean b, boolean l, boolean r, boolean j) {
+      mc.options.forwardKey.setPressed(f);
+      mc.options.backKey.setPressed(b);
+      mc.options.leftKey.setPressed(l);
+      mc.options.rightKey.setPressed(r);
+      mc.options.jumpKey.setPressed(j);
+      this.keysHeld = f || b || l || r || j;
+   }
 
-    private void moveToward(MinecraftClient mc, double tx, double tz, boolean jump) {
-        ClientPlayerEntity p = mc.player;
-        double dx = tx - p.getX();
-        double dz = tz - p.getZ();
-        float moveYaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
-        float rel = MathHelper.wrapDegrees(moveYaw - p.getYaw());
+   private void releaseKeys(MinecraftClient mc) {
+      if (this.keysHeld) {
+         this.setKeys(mc, false, false, false, false, false);
+      }
+   }
 
-        boolean f = Math.abs(rel) < 67.5f;
-        boolean b = Math.abs(rel) > 112.5f;
-        boolean r = rel > 22.5f && rel < 157.5f;
-        boolean l = rel < -22.5f && rel > -157.5f;
-        setKeys(mc, f, b, l, r, jump);
-    }
+   private List<BlockPos> findPath(MinecraftClient mc, Vec3d aim, AutoFarmClient.Kind kind, double radius) {
+      ClientWorld w = mc.world;
+      BlockPos start = feetCell(mc.player);
+      PriorityQueue<AutoFarmClient.Node> open = new PriorityQueue<>(Comparator.comparingDouble(nx -> nx.f));
+      Map<BlockPos, AutoFarmClient.Node> best = new HashMap<>();
+      Set<BlockPos> closed = new HashSet<>();
+      AutoFarmClient.Node s = new AutoFarmClient.Node(start);
+      s.g = 0.0;
+      s.f = heuristic(start, aim);
+      open.add(s);
+      best.put(start, s);
+      int expansions = 0;
 
-    private void setKeys(MinecraftClient mc, boolean f, boolean b, boolean l, boolean r, boolean j) {
-        mc.options.forwardKey.setPressed(f);
-        mc.options.backKey.setPressed(b);
-        mc.options.leftKey.setPressed(l);
-        mc.options.rightKey.setPressed(r);
-        mc.options.jumpKey.setPressed(j);
-        mc.options.sprintKey.setPressed(f && !b);
-        keysHeld = f || b || l || r || j;
-    }
-
-    private void releaseKeys(MinecraftClient mc) {
-        if (keysHeld) {
-            setKeys(mc, false, false, false, false, false);
-        }
-        mc.options.sprintKey.setPressed(false);
-    }
-
-    // ------------------------------------------------------------------ bakış
-
-    private void lookAt(ClientPlayerEntity p, Vec3d target) {
-        float step = lookStep();
-        Vec3d eye = p.getEyePos();
-        double dx = target.x - eye.x;
-        double dy = target.y - eye.y;
-        double dz = target.z - eye.z;
-        double h = Math.sqrt(dx * dx + dz * dz);
-
-        float wantYaw = (h < 0.5)
-                ? p.getYaw()
-                : (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
-        float wantPitch = (float) (-Math.toDegrees(Math.atan2(dy, h)));
-
-        float yawDiff = MathHelper.wrapDegrees(wantYaw - p.getYaw());
-        float pitchDiff = wantPitch - p.getPitch();
-
-        p.setYaw(p.getYaw() + MathHelper.clamp(yawDiff, -step, step));
-        p.setPitch(MathHelper.clamp(p.getPitch() + MathHelper.clamp(pitchDiff, -step, step), -90f, 90f));
-    }
-
-    private static BlockPos feetCell(ClientPlayerEntity p) {
-        return BlockPos.ofFloored(p.getX(), p.getY(), p.getZ());
-    }
-
-    // ------------------------------------------------------------------ A* yol bulma (sadece gerçekten engelliyken)
-
-    private static class Node {
-        final BlockPos pos;
-        Node parent;
-        double g, f;
-
-        Node(BlockPos pos) {
-            this.pos = pos;
-        }
-    }
-
-    private List<BlockPos> findPath(MinecraftClient mc, BlockPos goal) {
-        ClientWorld w = mc.world;
-        BlockPos start = feetCell(mc.player);
-
-        PriorityQueue<Node> open = new PriorityQueue<>(Comparator.comparingDouble((Node n) -> n.f));
-        Map<BlockPos, Node> best = new HashMap<>();
-        Set<BlockPos> closed = new HashSet<>();
-
-        Node s = new Node(start);
-        s.g = 0;
-        s.f = heuristic(start, goal);
-        open.add(s);
-        best.put(start, s);
-
-        int expansions = 0;
-        while (!open.isEmpty() && expansions < MAX_EXPANSIONS) {
-            Node cur = open.poll();
-            if (!closed.add(cur.pos)) continue;
+      while (!open.isEmpty() && expansions < 3000) {
+         AutoFarmClient.Node cur = open.poll();
+         if (closed.add(cur.pos)) {
             expansions++;
+            if (this.isGoal(cur.pos, aim, kind, radius)) {
+               List<BlockPos> out = new ArrayList<>();
 
-            if (cur.pos.isWithinDistance(goal, 1.2)) {
-                List<BlockPos> out = new ArrayList<>();
-                for (Node n = cur; n != null; n = n.parent) out.add(n.pos);
-                Collections.reverse(out);
-                return out;
+               for (AutoFarmClient.Node n = cur; n != null; n = n.parent) {
+                  out.add(n.pos);
+               }
+
+               Collections.reverse(out);
+               return out;
             }
 
             for (int[] d : DIRS) {
-                for (int dy = 1; dy >= 0; dy--) {
-                    BlockPos n = cur.pos.add(d[0], dy, d[1]);
-                    if (closed.contains(n)) continue;
-                    if (Math.abs(n.getX() - start.getX()) > PATH_RANGE
-                            || Math.abs(n.getZ() - start.getZ()) > PATH_RANGE
-                            || Math.abs(n.getY() - start.getY()) > 8) continue;
-                    if (!canMove(w, cur.pos, n, dy)) continue;
-
-                    double cost = 1.0 + (dy > 0 ? 1.5 : 0.0) + riskCost(w, n);
-                    double g = cur.g + cost;
-                    Node ex = best.get(n);
-                    if (ex == null || g < ex.g) {
-                        Node nn = new Node(n);
+               for (int dy = 1; dy >= 0; dy--) {
+                  BlockPos n = cur.pos.add(d[0], dy, d[1]);
+                  if (!closed.contains(n)
+                     && Math.abs(n.getX() - start.getX()) <= 24
+                     && Math.abs(n.getZ() - start.getZ()) <= 24
+                     && Math.abs(n.getY() - start.getY()) <= 8
+                     && this.canMove(w, cur.pos, n, dy)) {
+                     double cost = 1.0 + (dy > 0 ? 1.5 : 0.0) + (dy < 0 ? 1.0 : 0.0) + this.riskCost(w, n);
+                     double g = cur.g + cost;
+                     AutoFarmClient.Node ex = best.get(n);
+                     if (ex == null || g < ex.g) {
+                        AutoFarmClient.Node nn = new AutoFarmClient.Node(n);
                         nn.parent = cur;
                         nn.g = g;
-                        nn.f = g + heuristic(n, goal);
+                        nn.f = g + heuristic(n, aim);
                         best.put(n, nn);
                         open.add(nn);
-                    }
-                }
+                     }
+                  }
+               }
             }
-        }
-        return null;
-    }
+         }
+      }
 
-    private static double heuristic(BlockPos pos, BlockPos goal) {
-        return Math.hypot(pos.getX() - goal.getX(), pos.getZ() - goal.getZ());
-    }
+      return null;
+   }
 
-    private boolean canMove(ClientWorld w, BlockPos c, BlockPos n, int dy) {
-        if (dy == 0) {
-            return canStand(w, n);
-        }
-        return canStand(w, n) && passable(w, c.up(2));
-    }
+   private static double heuristic(BlockPos pos, Vec3d aim) {
+      return Math.hypot(pos.getX() + 0.5 - aim.x, pos.getZ() + 0.5 - aim.z);
+   }
 
-    private boolean canStand(ClientWorld w, BlockPos p) {
-        if (!passable(w, p) || !passable(w, p.up())) return false;
-        BlockPos fp = p.down();
-        BlockState floor = w.getBlockState(fp);
-        if (floor.getCollisionShape(w, fp).isEmpty()) return false;
-        if (!floor.getFluidState().isEmpty()) return false;
-        return !isHazard(floor.getBlock());
-    }
+   private boolean isGoal(BlockPos pos, Vec3d aim, AutoFarmClient.Kind kind, double radius) {
+      if (kind == AutoFarmClient.Kind.HARVEST) {
+         Vec3d eye = new Vec3d(pos.getX() + 0.5, pos.getY() + 1.62, pos.getZ() + 0.5);
+         return eye.distanceTo(aim) <= 3.0;
+      } else {
+         double hd = Math.hypot(pos.getX() + 0.5 - aim.x, pos.getZ() + 0.5 - aim.z);
+         return kind == AutoFarmClient.Kind.PLANT
+            ? hd <= radius && Math.abs(pos.getY() - this.targetPos.getY()) <= 1
+            : hd <= radius && Math.abs(pos.getY() + 0.5 - aim.y) <= 1.6;
+      }
+   }
 
-    private boolean passable(ClientWorld w, BlockPos pos) {
-        BlockState s = w.getBlockState(pos);
-        if (!s.getCollisionShape(w, pos).isEmpty()) return false;
-        if (!s.getFluidState().isEmpty()) return false;
-        return !isHazard(s.getBlock());
-    }
+   private boolean canMove(ClientWorld w, BlockPos c, BlockPos n, int dy) {
+      return dy == 0 ? this.canStand(w, n) : this.canStand(w, n) && this.passable(w, c.up(2));
+   }
 
-    private static boolean isHazard(Block b) {
-        return b == Blocks.FIRE || b == Blocks.SOUL_FIRE || b == Blocks.CACTUS
-                || b == Blocks.SWEET_BERRY_BUSH || b == Blocks.COBWEB || b == Blocks.POWDER_SNOW
-                || b == Blocks.MAGMA_BLOCK || b == Blocks.CAMPFIRE || b == Blocks.SOUL_CAMPFIRE
-                || b == Blocks.WITHER_ROSE;
-    }
+   private boolean canStand(ClientWorld w, BlockPos p) {
+      if (this.passable(w, p) && this.passable(w, p.up())) {
+         BlockPos fp = p.down();
+         BlockState floor = w.getBlockState(fp);
+         if (floor.getCollisionShape(w, fp).isEmpty()) {
+            return false;
+         } else {
+            return !floor.getFluidState().isEmpty() ? false : !isHazard(floor.getBlock());
+         }
+      } else {
+         return false;
+      }
+   }
 
-    private double riskCost(ClientWorld w, BlockPos n) {
-        double cost = 0;
-        for (int[] d : DIRS) {
-            BlockPos q = n.add(d[0], 0, d[1]);
-            if (!w.getFluidState(q).isEmpty()) {
-                cost += w.getFluidState(q).isIn(FluidTags.LAVA) ? 8 : 2;
-            }
-            if (!w.getFluidState(q.down()).isEmpty()) {
-                cost += w.getFluidState(q.down()).isIn(FluidTags.LAVA) ? 8 : 2;
-            }
-            if (w.getBlockState(q.down()).getCollisionShape(w, q.down()).isEmpty()
-                    && w.getBlockState(q.down(2)).getCollisionShape(w, q.down(2)).isEmpty()) {
-                cost += 1.5;
-            }
-        }
-        return cost;
-    }
+   private boolean passable(ClientWorld w, BlockPos pos) {
+      BlockState s = w.getBlockState(pos);
+      if (!s.getCollisionShape(w, pos).isEmpty()) {
+         return false;
+      } else {
+         return !s.getFluidState().isEmpty() ? false : !isHazard(s.getBlock());
+      }
+   }
 
-    // ------------------------------------------------------------------ yardımcılar
+   private static boolean isHazard(Block b) {
+      return b == Blocks.FIRE
+         || b == Blocks.SOUL_FIRE
+         || b == Blocks.CACTUS
+         || b == Blocks.SWEET_BERRY_BUSH
+         || b == Blocks.COBWEB
+         || b == Blocks.POWDER_SNOW
+         || b == Blocks.MAGMA_BLOCK
+         || b == Blocks.CAMPFIRE
+         || b == Blocks.SOUL_CAMPFIRE
+         || b == Blocks.WITHER_ROSE;
+   }
 
-    private static boolean isMature(BlockState state) {
-        Block b = state.getBlock();
-        if (b instanceof CropBlock crop) {
-            return crop.isMature(state);
-        }
-        if (b instanceof NetherWartBlock) {
-            return state.get(NetherWartBlock.AGE) >= 3;
-        }
-        return false;
-    }
+   private double riskCost(ClientWorld w, BlockPos n) {
+      double cost = 0.0;
 
-    private static boolean isSeed(ItemStack stack) {
-        if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem bi)) return false;
-        Block b = bi.getBlock();
-        return b instanceof CropBlock || b instanceof NetherWartBlock;
-    }
+      for (int[] d : DIRS) {
+         BlockPos q = n.add(d[0], 0, d[1]);
+         if (!w.getFluidState(q).isEmpty()) {
+            cost += w.getFluidState(q).isIn(FluidTags.LAVA) ? 8.0 : 2.0;
+         }
 
-    private boolean isSelectedSeed(ItemStack stack) {
-        return isSeed(stack) && cfg.isSelected(((BlockItem) stack.getItem()).getBlock());
-    }
+         if (!w.getFluidState(q.down()).isEmpty()) {
+            cost += w.getFluidState(q.down()).isIn(FluidTags.LAVA) ? 8.0 : 2.0;
+         }
 
-    private static int fortuneLevel(ItemStack stack) {
-        ItemEnchantmentsComponent ench = stack.getEnchantments();
-        for (RegistryEntry<Enchantment> e : ench.getEnchantments()) {
-            if (e.matchesKey(Enchantments.FORTUNE)) {
-                return ench.getLevel(e);
-            }
-        }
-        return 0;
-    }
+         if (w.getBlockState(q.down()).getCollisionShape(w, q.down()).isEmpty()
+            && w.getBlockState(q.down(2)).getCollisionShape(w, q.down(2)).isEmpty()) {
+            cost++;
+         }
+      }
+
+      return cost;
+   }
+
+   private static boolean isMature(BlockState state) {
+      Block b = state.getBlock();
+      if (b instanceof CropBlock crop) {
+         return crop.isMature(state);
+      } else {
+         return b instanceof NetherWartBlock ? (Integer)state.get(NetherWartBlock.AGE) >= 3 : false;
+      }
+   }
+
+   private static boolean isSeed(ItemStack stack) {
+      if (!stack.isEmpty() && stack.getItem() instanceof BlockItem bi) {
+         Block b = bi.getBlock();
+         return b instanceof CropBlock || b instanceof NetherWartBlock;
+      } else {
+         return false;
+      }
+   }
+
+   private boolean isSelectedSeed(ItemStack stack) {
+      return isSeed(stack) && this.cfg.isSelected(((BlockItem)stack.getItem()).getBlock());
+   }
+
+   private static int fortuneLevel(ItemStack stack) {
+      ItemEnchantmentsComponent ench = stack.getEnchantments();
+
+      for (RegistryEntry<Enchantment> e : ench.getEnchantments()) {
+         if (e.matchesKey(Enchantments.FORTUNE)) {
+            return ench.getLevel(e);
+         }
+      }
+
+      return 0;
+   }
+
+   private static enum Kind {
+      HARVEST,
+      PLANT,
+      ITEM;
+   }
+
+   private static class Node {
+      final BlockPos pos;
+      AutoFarmClient.Node parent;
+      double g;
+      double f;
+
+      Node(BlockPos pos) {
+         this.pos = pos;
+      }
+   }
 }
