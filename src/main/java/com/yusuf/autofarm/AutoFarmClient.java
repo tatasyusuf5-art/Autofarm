@@ -41,6 +41,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.RaycastContext;
 
 public class AutoFarmClient implements ClientModInitializer {
    /** Etkileşim mesafesi (göz -> hedef nokta). Vanilla sınırı 4.5. */
@@ -82,6 +83,9 @@ public class AutoFarmClient implements ClientModInitializer {
 
    // Alan / rota
    private final List<BlockPos> stations = new ArrayList<>();
+   private final List<Integer> layers = new ArrayList<>();
+   private final Set<Integer> layerSet = new HashSet<>();
+   private boolean pathWarned;
    private int stationIdx;
    private boolean routeBuilt;
    private boolean finished;
@@ -186,7 +190,7 @@ public class AutoFarmClient implements ClientModInitializer {
       this.routeBuilt = false;
       this.chat(mc, "[AutoFarm] Köşe " + idx + " = " + bp.getX() + ", " + y + ", " + bp.getZ() + "  " + this.areaInfo());
       if (this.cfg.hasArea() && this.cfg.p1y != this.cfg.p2y) {
-         this.chat(mc, "[AutoFarm] Uyarı: köşeler farklı katta, 1. köşenin katı (" + this.cfg.p1y + ") kullanılacak.");
+         this.chat(mc, "[AutoFarm] Çok katlı farm: Y " + this.cfg.minY() + ".." + this.cfg.maxY() + " arasındaki tüm ekin katları kullanılacak.");
       }
    }
 
@@ -203,7 +207,7 @@ public class AutoFarmClient implements ClientModInitializer {
       }
 
       return "Alan: " + this.areaSize() + " | X " + this.cfg.minX() + ".." + this.cfg.maxX()
-         + " Z " + this.cfg.minZ() + ".." + this.cfg.maxZ() + " Y " + this.cfg.farmY();
+         + " Z " + this.cfg.minZ() + ".." + this.cfg.maxZ() + " Y " + this.cfg.minY() + ".." + this.cfg.maxY();
    }
 
    private String areaSize() {
@@ -251,7 +255,7 @@ public class AutoFarmClient implements ClientModInitializer {
    }
 
    private int actionDelay() {
-      return this.cfg.speed >= 10 ? 0 : Math.max(1, 6 - this.cfg.speed / 2);
+      return this.cfg.speed >= 10 ? 0 : (this.cfg.speed >= 7 ? 1 : (this.cfg.speed >= 4 ? 2 : 3));
    }
 
    // ------------------------------------------------------------------ ana tick
@@ -373,14 +377,35 @@ public class AutoFarmClient implements ClientModInitializer {
       }
    }
 
-   // ------------------------------------------------------------------ ALAN MODU
-
-   private int cropY() {
-      return this.cfg.farmY() + 1;
-   }
+   // ------------------------------------------------------------------ ALAN MODU (çok katlı)
 
    private boolean inArea(BlockPos pos) {
-      return pos.getY() == this.cropY() && this.cfg.contains(pos.getX(), pos.getZ());
+      return this.layerSet.contains(pos.getY()) && this.cfg.contains(pos.getX(), pos.getZ());
+   }
+
+   private static boolean isGround(Block b) {
+      return b == Blocks.FARMLAND || b == Blocks.SOUL_SAND;
+   }
+
+   /** Alanın Y aralığındaki ekin katlarını bulur: içinde en az 2 çiftlik toprağı (ya da ruh kumu) olan katlar. */
+   private void detectLayers(MinecraftClient mc) {
+      this.layers.clear();
+      this.layerSet.clear();
+      for (int y = this.cfg.minY(); y <= this.cfg.maxY(); y++) {
+         int count = 0;
+         for (int x = this.cfg.minX(); x <= this.cfg.maxX() && count < 2; x++) {
+            for (int z = this.cfg.minZ(); z <= this.cfg.maxZ() && count < 2; z++) {
+               if (isGround(mc.world.getBlockState(new BlockPos(x, y, z)).getBlock())) {
+                  count++;
+               }
+            }
+         }
+
+         if (count >= 2) {
+            this.layers.add(y + 1);
+            this.layerSet.add(y + 1);
+         }
+      }
    }
 
    private AutoFarmClient.Kind cellKind(MinecraftClient mc, BlockPos pos, boolean harvest, Block plantBlock) {
@@ -397,48 +422,53 @@ public class AutoFarmClient implements ClientModInitializer {
    }
 
    private void areaTick(MinecraftClient mc, Hand plantHand, Block plantBlock, boolean harvest) {
-      // 1) Bulunduğun yerden erişilebilen iş varsa onu yap (rota üstünde fırsat)
+      // Her tick: erişimdeki en uygun işi yap VE (varsa) rotada ilerlemeye devam et (koşarken kır/ek)
       AutoFarmClient.Cell cell = this.bestReachable(mc, harvest, plantBlock);
       if (cell != null) {
-         this.releaseKeys(mc);
-         this.path = null;
          this.workOn(mc, cell, plantHand, plantBlock, harvest);
-         return;
+      } else {
+         this.blockedTicks = 0;
       }
 
-      this.blockedTicks = 0;
-      this.walkRoute(mc, harvest, plantBlock);
+      this.routeStep(mc, harvest, plantBlock, cell != null);
    }
 
-   /** Erişimdeki en uygun hücre: en az bakış dönüşü + yakınlık. */
+   /** Erişimdeki en uygun hücre: en az bakış dönüşü + yakınlık, ve arada engel olmayan (ışın hedefe değiyor). */
    private AutoFarmClient.Cell bestReachable(MinecraftClient mc, boolean harvest, Block plantBlock) {
       ClientPlayerEntity p = mc.player;
       Vec3d eye = p.getEyePos();
       BlockPos feet = p.getBlockPos();
-      int y = this.cropY();
       AutoFarmClient.Cell best = null;
       double bestScore = Double.MAX_VALUE;
 
-      for (int dx = -5; dx <= 5; dx++) {
-         for (int dz = -5; dz <= 5; dz++) {
-            BlockPos pos = new BlockPos(feet.getX() + dx, y, feet.getZ() + dz);
-            if (!this.cfg.contains(pos.getX(), pos.getZ()) || this.blacklist.containsKey(pos)) {
-               continue;
-            }
+      for (int ly : this.layers) {
+         if (Math.abs(ly - feet.getY()) > 6) {
+            continue;
+         }
 
-            AutoFarmClient.Kind k = this.cellKind(mc, pos, harvest, plantBlock);
-            if (k == null) {
-               continue;
-            }
+         for (int dx = -5; dx <= 5; dx++) {
+            for (int dz = -5; dz <= 5; dz++) {
+               BlockPos pos = new BlockPos(feet.getX() + dx, ly, feet.getZ() + dz);
+               if (!this.cfg.contains(pos.getX(), pos.getZ()) || this.blacklist.containsKey(pos)) {
+                  continue;
+               }
 
-            Vec3d aim = aimPoint(pos);
-            double d = eye.distanceTo(aim);
-            if (d > REACH) {
-               continue;
-            }
+               AutoFarmClient.Kind k = this.cellKind(mc, pos, harvest, plantBlock);
+               if (k == null) {
+                  continue;
+               }
 
-            double score = this.lookError(p, aim) + d * 3.0;
-            if (score < bestScore) {
+               Vec3d aim = aimPoint(pos);
+               double d = eye.distanceTo(aim);
+               if (d > REACH) {
+                  continue;
+               }
+
+               double score = this.lookError(p, aim) + d * 3.0;
+               if (score >= bestScore || !this.clearView(mc, eye, aim, pos, k)) {
+                  continue;
+               }
+
                bestScore = score;
                best = new AutoFarmClient.Cell(pos, k);
             }
@@ -446,6 +476,27 @@ public class AutoFarmClient implements ClientModInitializer {
       }
 
       return best;
+   }
+
+   /** Gözden hedef noktaya çekilen ışın gerçekten hedef bloğa mı çarpıyor? (kat tavanı, duvar, yüksek ekin vb. engeli) */
+   private boolean clearView(MinecraftClient mc, Vec3d eye, Vec3d aim, BlockPos pos, AutoFarmClient.Kind k) {
+      Vec3d dir = aim.subtract(eye);
+      double len = dir.length();
+      if (len < 1.0E-4) {
+         return false;
+      }
+
+      Vec3d end = aim.add(dir.multiply(0.6 / len));
+      BlockHitResult r = mc.world.raycast(new RaycastContext(eye, end, RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, mc.player));
+      if (r.getType() != HitResult.Type.BLOCK) {
+         return false;
+      }
+
+      if (k == AutoFarmClient.Kind.HARVEST) {
+         return r.getBlockPos().equals(pos);
+      }
+
+      return r.getBlockPos().equals(pos.down()) && r.getSide() == Direction.UP;
    }
 
    private void workOn(MinecraftClient mc, AutoFarmClient.Cell cell, Hand plantHand, Block plantBlock, boolean harvest) {
@@ -516,10 +567,28 @@ public class AutoFarmClient implements ClientModInitializer {
       }
 
       this.actionCooldown = this.actionDelay();
+      this.preAim(mc, harvest, plantBlock);
    }
 
-   /** İstasyonları sırayla gez; rota bitince eksik kalan yer var mı tara. */
-   private void walkRoute(MinecraftClient mc, boolean harvest, Block plantBlock) {
+   /**
+    * Eylemden hemen sonra sıradaki hedefe dön. Dönüş bir sonraki tick'in başında sunucuya gider,
+    * eylem o tick'te yapılır: böylece her tick bir eylem yapılabilir, dönüş için ekstra tick harcanmaz.
+    */
+   private void preAim(MinecraftClient mc, boolean harvest, Block plantBlock) {
+      AutoFarmClient.Cell next = this.bestReachable(mc, harvest, plantBlock);
+      if (next == null) {
+         return;
+      }
+
+      ClientPlayerEntity p = mc.player;
+      this.lookAt(p, aimPoint(next.pos()));
+      this.lastYaw = p.getYaw();
+      this.lastPitch = p.getPitch();
+      this.haveLast = true;
+   }
+
+   /** İstasyonları sırayla gez (iş yaparken de yürümeye devam et); rota bitince eksik kalan yer var mı tara. */
+   private void routeStep(MinecraftClient mc, boolean harvest, Block plantBlock, boolean workInReach) {
       ClientPlayerEntity p = mc.player;
       if (!this.routeBuilt) {
          this.buildRoute(mc);
@@ -532,13 +601,30 @@ public class AutoFarmClient implements ClientModInitializer {
 
       while (this.stationIdx < this.stations.size()) {
          BlockPos st = this.stations.get(this.stationIdx);
-         if (!this.stationHasWork(mc, st, harvest, plantBlock) || this.arrived(p, st)) {
+         if (!this.stationHasWork(mc, st, harvest, plantBlock)) {
+            this.nextStation();
+            continue;
+         }
+
+         if (this.arrived(p, st)) {
+            if (workInReach) {
+               // istasyonun işi bitene kadar dur
+               this.releaseKeys(mc);
+               return;
+            }
+
             this.nextStation();
             continue;
          }
 
          if (!this.navigate(mc, Vec3d.ofCenter(st), AutoFarmClient.Kind.STATION, 0.6)) {
             this.releaseKeys(mc);
+            if (!this.pathWarned) {
+               this.pathWarned = true;
+               this.chat(mc, "[AutoFarm] Bir istasyona yol bulunamadı (" + st.getX() + ", " + st.getY() + ", " + st.getZ()
+                  + "). Katlar arası geçiş (merdiven/rampa) var mı? Atlıyorum.");
+            }
+
             this.nextStation();
             continue;
          }
@@ -546,7 +632,12 @@ public class AutoFarmClient implements ClientModInitializer {
          return;
       }
 
-      // Rota bitti: kontrol turu (eksik ekilmemiş / olgun yer kaldı mı)
+      // Rota bitti
+      if (workInReach) {
+         this.releaseKeys(mc);
+         return;
+      }
+
       if (this.finished) {
          this.releaseKeys(mc);
          if (++this.idleScan < 20) {
@@ -562,6 +653,7 @@ public class AutoFarmClient implements ClientModInitializer {
          return;
       }
 
+      // Kontrol turu: eksik ekilmemiş / olgun yer kaldı mı
       AutoFarmClient.Cell left = this.nearestActionable(mc, harvest, plantBlock);
       if (left != null) {
          if (!this.navigate(mc, aimPoint(left.pos()), AutoFarmClient.Kind.HARVEST, 3.0)) {
@@ -594,7 +686,7 @@ public class AutoFarmClient implements ClientModInitializer {
    private boolean stationHasWork(MinecraftClient mc, BlockPos st, boolean harvest, Block plantBlock) {
       for (int dx = -STATION_RADIUS; dx <= STATION_RADIUS; dx++) {
          for (int dz = -STATION_RADIUS; dz <= STATION_RADIUS; dz++) {
-            BlockPos pos = new BlockPos(st.getX() + dx, this.cropY(), st.getZ() + dz);
+            BlockPos pos = new BlockPos(st.getX() + dx, st.getY(), st.getZ() + dz);
             if (this.cfg.contains(pos.getX(), pos.getZ()) && !this.blacklist.containsKey(pos)
                && this.cellKind(mc, pos, harvest, plantBlock) != null) {
                return true;
@@ -609,22 +701,24 @@ public class AutoFarmClient implements ClientModInitializer {
       ClientPlayerEntity p = mc.player;
       AutoFarmClient.Cell best = null;
       double bd = Double.MAX_VALUE;
-      for (int x = this.cfg.minX(); x <= this.cfg.maxX(); x++) {
-         for (int z = this.cfg.minZ(); z <= this.cfg.maxZ(); z++) {
-            BlockPos pos = new BlockPos(x, this.cropY(), z);
-            if (this.blacklist.containsKey(pos)) {
-               continue;
-            }
+      for (int ly : this.layers) {
+         for (int x = this.cfg.minX(); x <= this.cfg.maxX(); x++) {
+            for (int z = this.cfg.minZ(); z <= this.cfg.maxZ(); z++) {
+               BlockPos pos = new BlockPos(x, ly, z);
+               if (this.blacklist.containsKey(pos)) {
+                  continue;
+               }
 
-            AutoFarmClient.Kind k = this.cellKind(mc, pos, harvest, plantBlock);
-            if (k == null) {
-               continue;
-            }
+               AutoFarmClient.Kind k = this.cellKind(mc, pos, harvest, plantBlock);
+               if (k == null) {
+                  continue;
+               }
 
-            double d = Math.hypot(x + 0.5 - p.getX(), z + 0.5 - p.getZ());
-            if (d < bd) {
-               bd = d;
-               best = new AutoFarmClient.Cell(pos, k);
+               double d = Math.hypot(x + 0.5 - p.getX(), z + 0.5 - p.getZ()) + Math.abs(ly - p.getY()) * 3.0;
+               if (d < bd) {
+                  bd = d;
+                  best = new AutoFarmClient.Cell(pos, k);
+               }
             }
          }
       }
@@ -634,14 +728,49 @@ public class AutoFarmClient implements ClientModInitializer {
 
    // ------------------------------------------------------------------ rota çıkarma
 
-   /** Alanı 5x5'lik istasyonlara böler ve yılan (zikzak) sırasıyla dizer; oyuncuya en yakın köşeden başlar. */
+   /** Katları oyuncuya en yakından başlayarak sırala, her katı yılan (zikzak) rotayla dizip birleştir. */
    private void buildRoute(MinecraftClient mc) {
       this.stations.clear();
+      this.pathWarned = false;
+      this.detectLayers(mc);
+      if (this.layers.isEmpty()) {
+         this.chat(mc, "[AutoFarm] Alanda çiftlik toprağı bulunamadı. Köşeleri toprağın üstüne bakarak seç.");
+         return;
+      }
+
+      BlockPos pf = mc.player.getBlockPos();
+      List<Integer> pending = new ArrayList<>(this.layers);
+      List<Integer> order = new ArrayList<>();
+      int curY = pf.getY();
+      while (!pending.isEmpty()) {
+         int bestL = pending.get(0);
+         for (int ly : pending) {
+            if (Math.abs(ly - curY) < Math.abs(bestL - curY)) {
+               bestL = ly;
+            }
+         }
+
+         pending.remove(Integer.valueOf(bestL));
+         order.add(bestL);
+         curY = bestL;
+      }
+
+      BlockPos from = pf;
+      for (int ly : order) {
+         List<BlockPos> route = this.layerRoute(mc, ly, from);
+         if (!route.isEmpty()) {
+            this.stations.addAll(route);
+            from = route.get(route.size() - 1);
+         }
+      }
+   }
+
+   /** Tek kat için: 5x5'lik istasyonlar, yılan sırası, bir önceki konuma en yakın köşeden başla. */
+   private List<BlockPos> layerRoute(MinecraftClient mc, int ly, BlockPos from) {
       List<Integer> xs = centers(this.cfg.minX(), this.cfg.maxX());
       List<Integer> zs = centers(this.cfg.minZ(), this.cfg.maxZ());
       boolean rowsAlongX = this.cfg.maxX() - this.cfg.minX() >= this.cfg.maxZ() - this.cfg.minZ();
-      BlockPos pf = mc.player.getBlockPos();
-      List<BlockPos> bestRoute = null;
+      List<BlockPos> bestRoute = new ArrayList<>();
       double bestDist = Double.MAX_VALUE;
 
       for (int variant = 0; variant < 4; variant++) {
@@ -660,14 +789,14 @@ public class AutoFarmClient implements ClientModInitializer {
             for (int zi = 0; zi < vz.size(); zi++) {
                for (int k = 0; k < vx.size(); k++) {
                   int xi = zi % 2 == 0 ? k : vx.size() - 1 - k;
-                  this.addStation(mc, route, vx.get(xi), vz.get(zi));
+                  this.addStation(mc, route, vx.get(xi), vz.get(zi), ly);
                }
             }
          } else {
             for (int xi = 0; xi < vx.size(); xi++) {
                for (int k = 0; k < vz.size(); k++) {
                   int zi = xi % 2 == 0 ? k : vz.size() - 1 - k;
-                  this.addStation(mc, route, vx.get(xi), vz.get(zi));
+                  this.addStation(mc, route, vx.get(xi), vz.get(zi), ly);
                }
             }
          }
@@ -676,20 +805,18 @@ public class AutoFarmClient implements ClientModInitializer {
             continue;
          }
 
-         double d = Math.hypot(route.get(0).getX() - pf.getX(), route.get(0).getZ() - pf.getZ());
+         double d = Math.hypot(route.get(0).getX() - from.getX(), route.get(0).getZ() - from.getZ());
          if (d < bestDist) {
             bestDist = d;
             bestRoute = route;
          }
       }
 
-      if (bestRoute != null) {
-         this.stations.addAll(bestRoute);
-      }
+      return bestRoute;
    }
 
    /** İstasyon merkezi durulabilir değilse (su, çit vb.) yakındaki en yakın durulabilir hücreyi seçer. */
-   private void addStation(MinecraftClient mc, List<BlockPos> route, int cx, int cz) {
+   private void addStation(MinecraftClient mc, List<BlockPos> route, int cx, int cz, int ly) {
       BlockPos pick = null;
       double bd = Double.MAX_VALUE;
       for (int dx = -STATION_RADIUS; dx <= STATION_RADIUS; dx++) {
@@ -700,7 +827,7 @@ public class AutoFarmClient implements ClientModInitializer {
                continue;
             }
 
-            BlockPos cand = new BlockPos(x, this.cropY(), z);
+            BlockPos cand = new BlockPos(x, ly, z);
             if (!this.canStand(mc.world, cand)) {
                continue;
             }
@@ -955,8 +1082,8 @@ public class AutoFarmClient implements ClientModInitializer {
     */
    private boolean settled(ClientPlayerEntity p) {
       boolean s = this.haveLast
-         && Math.abs(MathHelper.wrapDegrees(p.getYaw() - this.lastYaw)) < 0.5F
-         && Math.abs(p.getPitch() - this.lastPitch) < 0.5F;
+         && Math.abs(MathHelper.wrapDegrees(p.getYaw() - this.lastYaw)) < 2.5F
+         && Math.abs(p.getPitch() - this.lastPitch) < 2.5F;
       this.lastYaw = p.getYaw();
       this.lastPitch = p.getPitch();
       this.haveLast = true;
@@ -1047,6 +1174,7 @@ public class AutoFarmClient implements ClientModInitializer {
       mc.options.leftKey.setPressed(l);
       mc.options.rightKey.setPressed(r);
       mc.options.jumpKey.setPressed(j);
+      mc.options.sprintKey.setPressed(f && !b);
       this.keysHeld = f || b || l || r || j;
    }
 
@@ -1071,7 +1199,7 @@ public class AutoFarmClient implements ClientModInitializer {
       best.put(start, s);
       int expansions = 0;
 
-      while (!open.isEmpty() && expansions < 3000) {
+      while (!open.isEmpty() && expansions < 8000) {
          AutoFarmClient.Node cur = open.poll();
          if (closed.add(cur.pos)) {
             expansions++;
@@ -1087,14 +1215,14 @@ public class AutoFarmClient implements ClientModInitializer {
             }
 
             for (int[] d : DIRS) {
-               for (int dy = 1; dy >= 0; dy--) {
+               for (int dy = 1; dy >= -3; dy--) {
                   BlockPos n = cur.pos.add(d[0], dy, d[1]);
                   if (!closed.contains(n)
-                     && Math.abs(n.getX() - start.getX()) <= 24
-                     && Math.abs(n.getZ() - start.getZ()) <= 24
-                     && Math.abs(n.getY() - start.getY()) <= 8
+                     && Math.abs(n.getX() - start.getX()) <= 48
+                     && Math.abs(n.getZ() - start.getZ()) <= 48
+                     && Math.abs(n.getY() - start.getY()) <= 24
                      && this.canMove(w, cur.pos, n, dy)) {
-                     double cost = 1.0 + (dy > 0 ? 1.5 : 0.0) + (dy < 0 ? 1.0 : 0.0) + this.riskCost(w, n);
+                     double cost = 1.0 + (dy > 0 ? 1.5 : 0.0) + (dy < 0 ? -dy * 1.0 : 0.0) + this.riskCost(w, n);
                      double g = cur.g + cost;
                      AutoFarmClient.Node ex = best.get(n);
                      if (ex == null || g < ex.g) {
@@ -1134,7 +1262,26 @@ public class AutoFarmClient implements ClientModInitializer {
    }
 
    private boolean canMove(ClientWorld w, BlockPos c, BlockPos n, int dy) {
-      return dy == 0 ? this.canStand(w, n) : this.canStand(w, n) && this.passable(w, c.up(2));
+      if (dy == 0) {
+         return this.canStand(w, n);
+      }
+
+      if (dy > 0) {
+         return this.canStand(w, n) && this.passable(w, c.up(2));
+      }
+
+      // Aşağı iniş (merdiven / basamak / en çok 3 blok düşüş): çiftlik toprağına düşme (ezilir)
+      if (!this.canStand(w, n) || w.getBlockState(n.down()).isOf(Blocks.FARMLAND)) {
+         return false;
+      }
+
+      for (int yy = n.getY(); yy <= c.getY() + 1; yy++) {
+         if (!this.passable(w, new BlockPos(n.getX(), yy, n.getZ()))) {
+            return false;
+         }
+      }
+
+      return true;
    }
 
    private boolean canStand(ClientWorld w, BlockPos p) {
