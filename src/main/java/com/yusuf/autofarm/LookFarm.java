@@ -15,6 +15,7 @@ import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.util.ActionResult;
@@ -80,6 +81,7 @@ public final class LookFarm {
             if (s.isIn(ItemTags.HOES) && (hoe < 0 || fortune(s) > fortune(inv.getStack(hoe)))) hoe = i;
         }
 
+        String notice = hoe < 0 ? "Hotbarda çapa yok! (elle kırılıyor)" : null;
         Block brokenBlock = null;
 
         // 1) Olgunsa kır
@@ -88,7 +90,7 @@ public final class LookFarm {
             if (cfg.requireFortune && (hoe < 0 || fortune(inv.getStack(hoe)) < 3)) {
                 return "Hotbarda Servet III alet olmalı! (Servet III zorunluluğu açık)";
             }
-            if (hoe >= 0) inv.selectedSlot = hoe;
+            if (hoe >= 0) select(p, inv, hoe);
             im.attackBlock(crop, Direction.UP);
             p.swingHand(Hand.MAIN_HAND);
             brokenBlock = cs.getBlock();
@@ -99,7 +101,7 @@ public final class LookFarm {
         if (!hasCrop) {
             int seed = findSeed(inv, cfg, brokenBlock);
             if (seed < 0) return "Hotbara ekin koy! (havuç, patates vs.)";
-            inv.selectedSlot = seed;
+            select(p, inv, seed);
             BlockHitResult place = new BlockHitResult(
                     Vec3d.ofCenter(farm).add(0.0, 0.4375, 0.0), Direction.UP, farm, false);
             ActionResult r = im.interactBlock(p, Hand.MAIN_HAND, place);
@@ -109,13 +111,19 @@ public final class LookFarm {
 
         // 3) Kemik tozu
         if (bone < 0) return "Hotbarda kemik tozu yok!";
-        inv.selectedSlot = bone;
+        select(p, inv, bone);
         BlockHitResult bh = new BlockHitResult(Vec3d.ofCenter(crop), Direction.UP, crop, false);
         for (int i = 0; i < BONE_PER_TICK; i++) {
             im.interactBlock(p, Hand.MAIN_HAND, bh);
         }
         p.swingHand(Hand.MAIN_HAND);
-        return null;
+        return notice;
+    }
+
+    /** Slotu seç ve sunucuya hemen bildir. (attackBlock slotu kendisi senkronlamıyor, çapa sunucuda eski slottaymış gibi kalıyordu.) */
+    private static void select(ClientPlayerEntity p, PlayerInventory inv, int slot) {
+        inv.selectedSlot = slot;
+        p.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(slot));
     }
 
     /** Hotbarda seçili ekinlerden birini bul; kırdığımız ekinle aynı olanı tercih et. */
