@@ -1,12 +1,12 @@
 package com.yusuf.autofarm;
 
-import net.minecraft.util.Formatting;
-import net.minecraft.text.Text;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
-import net.minecraft.client.gui.widget.SliderWidget;
-import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.gui.widget.SliderWidget;
+import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 
 public class AutoFarmScreen extends Screen {
    private static final String[] MODE_NAMES = new String[]{"Mod 1: Kır", "Mod 2: Ek", "Mod 3: Kır + Ek", "Mod 4: Kemik tozu"};
@@ -20,12 +20,12 @@ public class AutoFarmScreen extends Screen {
 
    protected void init() {
       AutoFarmConfig cfg = AutoFarmConfig.get();
-      int gap = 22;
+      int rows = 9;
+      int gap = Math.max(20, Math.min(22, (this.height - 36) / rows));
       int bw = 200;
       int half = 98;
       int left = this.width / 2 - bw / 2;
       int right = left + bw - half;
-      int rows = 7;
       int y = Math.max(24, this.height / 2 - rows * gap / 2);
       this.titleY = y - 14;
       this.addDrawableChild(ButtonWidget.builder(Text.literal(MODE_NAMES[cfg.mode]), b -> {
@@ -57,11 +57,39 @@ public class AutoFarmScreen extends Screen {
       }
 
       y += 3 * gap;
+
+      // Farm alanı: baktığın bloğu köşe olarak kaydeder
+      this.addDrawableChild(ButtonWidget.builder(cornerText(1), b -> {
+         this.farm.setCorner(MinecraftClient.getInstance(), 1);
+         b.setMessage(cornerText(1));
+      }).dimensions(left, y, half, 20).build());
+      this.addDrawableChild(ButtonWidget.builder(cornerText(2), b -> {
+         this.farm.setCorner(MinecraftClient.getInstance(), 2);
+         b.setMessage(cornerText(2));
+      }).dimensions(right, y, half, 20).build());
+      y += gap;
+      this.addDrawableChild(ButtonWidget.builder(toggleText("Alan", cfg.useArea), b -> {
+         cfg.useArea = !cfg.useArea;
+         b.setMessage(toggleText("Alan", cfg.useArea));
+      }).dimensions(left, y, half, 20).build());
+      this.addDrawableChild(ButtonWidget.builder(Text.literal("Alanı Sil"), b -> {
+         this.farm.clearArea();
+         this.clearAndInit();
+      }).dimensions(right, y, half, 20).build());
+      y += gap;
+
       this.addDrawableChild(ButtonWidget.builder(this.startText(), b -> {
          this.farm.toggle(MinecraftClient.getInstance());
          b.setMessage(this.startText());
       }).dimensions(left, y, half, 20).build());
       this.addDrawableChild(ButtonWidget.builder(Text.literal("Kapat"), b -> this.close()).dimensions(right, y, half, 20).build());
+   }
+
+   private static Text cornerText(int idx) {
+      AutoFarmConfig cfg = AutoFarmConfig.get();
+      boolean set = idx == 1 ? cfg.hasP1 : cfg.hasP2;
+      return Text.literal("Köşe " + idx + ": ")
+         .append(Text.literal(set ? "✓ yenile" : "seç").formatted(set ? Formatting.GREEN : Formatting.YELLOW));
    }
 
    private Text startText() {
