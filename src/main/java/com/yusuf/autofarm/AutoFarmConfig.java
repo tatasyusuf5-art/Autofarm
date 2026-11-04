@@ -58,9 +58,14 @@ public class AutoFarmConfig {
       return Math.max(this.p1z, this.p2z);
    }
 
-   /** Çiftlik toprağının Y katı (1. köşenin katı). */
-   public int farmY() {
-      return this.p1y;
+   /** Alanın en alt çiftlik toprağı katı (köşelerin Y'lerinden küçüğü). */
+   public int minY() {
+      return Math.min(this.p1y, this.p2y);
+   }
+
+   /** Alanın en üst çiftlik toprağı katı (köşelerin Y'lerinden büyüğü). */
+   public int maxY() {
+      return Math.max(this.p1y, this.p2y);
    }
 
    public boolean contains(int x, int z) {
