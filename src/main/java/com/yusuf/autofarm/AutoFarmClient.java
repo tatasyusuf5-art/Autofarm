@@ -84,6 +84,7 @@ implements ClientModInitializer {
     private final Map<BlockPos, Integer> blacklist = new HashMap<BlockPos, Integer>();
     private final Map<BlockPos, Integer> replant = new HashMap<BlockPos, Integer>();
     private final Set<Integer> ignoredItems = new HashSet<Integer>();
+    private final PlantBot plantBot = new PlantBot(this);
 
     // PatatesBot hasat sistemi (Mod 1: Kır) için durum
     private boolean pbLevelPending = true;
@@ -143,10 +144,11 @@ implements ClientModInitializer {
         this.replant.clear();
         this.ignoredItems.clear();
         this.pbReset();
+        this.plantBot.reset();
         this.releaseKeys(mc);
     }
 
-    private void say(MinecraftClient mc, String msg) {
+    void say(MinecraftClient mc, String msg) {
         if (mc.player != null) {
             mc.player.sendMessage((Text)Text.literal((String)msg), true);
         }
@@ -199,7 +201,7 @@ implements ClientModInitializer {
             if (this.actionCooldown > 0) {
                 --this.actionCooldown;
             }
-            if (this.enabled && mc.player != null && mc.world != null && mc.interactionManager != null && mc.currentScreen == null && !mc.player.isSpectator()) {
+            if (this.enabled && mc.player != null && mc.world != null && mc.interactionManager != null && (mc.currentScreen == null || this.cfg.mode == 1 && this.plantBot.wantsInventory(mc)) && !mc.player.isSpectator()) {
                 if (this.tickCounter % 40 == 0) {
                     this.blacklist.values().removeIf(t -> t < this.tickCounter);
                     this.replant.values().removeIf(t -> t < this.tickCounter);
@@ -229,6 +231,10 @@ implements ClientModInitializer {
                         this.releaseKeys(mc);
                         return;
                     }
+                }
+                if (this.cfg.mode == 1) {
+                    this.plantBot.tick(mc);
+                    return;
                 }
                 if (this.cfg.mode == 0) {
                     this.pbHarvest(mc);
@@ -690,6 +696,24 @@ implements ClientModInitializer {
             return ench.getLevel(e);
         }
         return 0;
+    }
+
+    // ---- PlantBot (Mod 2: Ek) yardımcıları ----
+
+    /** Menüde seçili bir ekinin tohumu mu? (nether siğili dahil) */
+    boolean isPlantableSeed(ItemStack stack) {
+        return this.isSelectedSeed(stack);
+    }
+
+    /** Bot kendiliğinden kapanırsa (tarla bitti, suda takıldı vb.). */
+    void autoOff(MinecraftClient mc, String msg) {
+        this.enabled = false;
+        this.resetState(mc);
+        this.say(mc, msg);
+    }
+
+    void markKeys() {
+        this.keysHeld = true;
     }
 
     // ================= PatatesBot hasat sistemi (Mod 1: Kır) =================
