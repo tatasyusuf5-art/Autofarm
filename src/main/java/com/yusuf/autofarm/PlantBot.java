@@ -26,8 +26,8 @@ import net.minecraft.world.WorldView;
  * en yakın boş yere koşar, menzildeki boş yerlere tick başına birkaç tane birden eker.
  */
 public class PlantBot {
-    /** Tek tick'te en fazla kaç yere ekim yapılır (hasattaki 4 ile aynı). */
-    private static final int PLANT_PER_TICK = 4;
+    /** Tek tick'te en fazla kaç yere ekim yapılır (düşük tutuldu, sunucu geri sarmasın diye). */
+    private static final int PLANT_PER_TICK = 2;
     private static final double REACH = 4.0;
     private static final int SEARCH_RADIUS = 12;
 
