@@ -1,7 +1,7 @@
 package com.yusuf.autofarm;
 
-import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.CropBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.InventoryScreen;
@@ -19,17 +19,13 @@ import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.Vec3i;
 import net.minecraft.world.BlockView;
-import net.minecraft.world.WorldView;
 
 /**
- * Mod 2: Ek. PatatesBot'un şerit (yılan düzeni) ekme sistemi. İki fark var:
- * ekim sırasında kamera hedefe çevrilmiyor (bot durmadan koşuyor) ve tick başına
- * PLANT_PER_TICK kadar ekim yapılıyor. Ekilecek şey menüde seçili ekinlerdir.
+ * Mod 2: Ek. PatatesBot'un ekme sistemi birebir (şerit/yılan düzeni, tick başına 1 ekim,
+ * her ekimde kamera hedefe döner, bloğun ortasına tıklar). Tek fark: ekilecek şey
+ * patates yerine menüde seçili ekinlerdir (patates, havuç, buğday, pancar).
  */
 public class PlantBot {
-    /** Tek tick'te en fazla kaç yere ekim yapılır. */
-    private static final int PLANT_PER_TICK = 2;
-
     private enum Inv { FARM, OPEN_INV, SWAP, CLOSE }
 
     private enum Next { SNAKE, BP_OUT, BP_FWD, BP_BACK }
@@ -235,29 +231,20 @@ public class PlantBot {
     }
 
     private void tryPlant(MinecraftClient mc) {
-        int placed = 0;
-        while (placed < PLANT_PER_TICK) {
-            if (this.seedBlock(mc) == null) {
-                break;
-            }
-            BlockPos target = this.findPlantSpot(mc);
-            if (target == null) {
-                break;
-            }
-            double top = (double)target.getY() + (mc.world.getBlockState(target).isOf(Blocks.FARMLAND) ? 0.9375 : 1.0);
-            Vec3d hit = new Vec3d((double)target.getX() + 0.5, top, (double)target.getZ() + 0.5);
-            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, new BlockHitResult(hit, Direction.UP, target, false));
-            ++placed;
+        BlockPos target = this.findPlantSpot(mc);
+        if (target == null) {
+            return;
         }
-        if (placed > 0) {
-            mc.player.swingHand(Hand.MAIN_HAND);
-        }
-    }
-
-    /** Elindeki tohumun bloğu; elde menüde seçili bir tohum yoksa null. */
-    private Block seedBlock(MinecraftClient mc) {
-        ItemStack st = mc.player.getMainHandStack();
-        return this.host.isPlantableSeed(st) ? ((BlockItem)st.getItem()).getBlock() : null;
+        Vec3d eye = mc.player.getEyePos();
+        Vec3d c = Vec3d.ofCenter((Vec3i)target);
+        double dx = c.x - eye.x;
+        double dy = c.y + 0.1 - eye.y;
+        double dz = c.z - eye.z;
+        double hor = Math.sqrt(dx * dx + dz * dz);
+        mc.player.setYaw((float)(Math.toDegrees(Math.atan2(dz, dx)) - 90.0));
+        mc.player.setPitch((float)MathHelper.clamp((double)(-Math.toDegrees(Math.atan2(dy, hor))), (double)-10.0, (double)90.0));
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, new BlockHitResult(c, Direction.UP, target, false));
+        mc.player.swingHand(Hand.MAIN_HAND);
     }
 
     private BlockPos findPlantSpot(MinecraftClient mc) {
@@ -441,7 +428,7 @@ public class PlantBot {
     }
 
     private boolean isFloor(BlockState st) {
-        return st.isOf(Blocks.FARMLAND) || st.isOf(Blocks.SOUL_SAND);
+        return st.isOf(Blocks.FARMLAND);
     }
 
     private boolean walkable(MinecraftClient mc, BlockPos p) {
@@ -487,15 +474,13 @@ public class PlantBot {
     }
 
     private boolean canPlant(MinecraftClient mc, BlockPos p) {
-        if (!this.isFloor(mc.world.getBlockState(p)) || !mc.world.getBlockState(p.up()).isAir()) {
-            return false;
-        }
-        Block sb = this.seedBlock(mc);
-        return sb != null && sb.getDefaultState().canPlaceAt((WorldView)mc.world, p.up());
+        BlockState st = mc.world.getBlockState(p);
+        boolean ok = st.isOf(Blocks.FARMLAND);
+        return ok && mc.world.getBlockState(p.up()).isAir();
     }
 
     private boolean isTool(ItemStack st) {
-        return this.host.isPlantableSeed(st);
+        return this.host.isPlantableSeed(st) && ((BlockItem)st.getItem()).getBlock() instanceof CropBlock;
     }
 
     private boolean ensureSeedInHand(MinecraftClient mc) {
