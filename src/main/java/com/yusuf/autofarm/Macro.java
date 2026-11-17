@@ -43,6 +43,7 @@ final class Macro {
     private String filter = "";
     private List<Integer> bulk = null;
     private int bulkIdx = 0;
+    private int bulkSync = -1;
 
     Macro(AutoFarmClient host) {
         this.host = host;
@@ -154,9 +155,13 @@ final class Macro {
                     return;
                 }
                 ScreenHandler h = mc.player.currentScreenHandler;
+                if (this.bulk != null && this.bulkSync != h.syncId) {
+                    this.bulk = null;
+                }
                 if (this.bulk == null) {
                     this.bulk = new ArrayList<Integer>();
                     this.bulkIdx = 0;
+                    this.bulkSync = h.syncId;
                     for (Slot sl : h.slots) {
                         if (sl.inventory == mc.player.getInventory() && sl.hasStack() && this.matches(sl.getStack())) {
                             this.bulk.add(sl.id);
@@ -164,8 +169,11 @@ final class Macro {
                     }
                 }
                 if (this.bulkIdx < this.bulk.size()) {
-                    mc.interactionManager.clickSlot(h.syncId, this.bulk.get(this.bulkIdx++), 0, SlotActionType.QUICK_MOVE, mc.player);
-                    this.cool = this.itemDelay - 1;
+                    int id = this.bulk.get(this.bulkIdx++);
+                    if (id < h.slots.size() && h.getSlot(id).hasStack()) {
+                        mc.interactionManager.clickSlot(h.syncId, id, 0, SlotActionType.QUICK_MOVE, mc.player);
+                        this.cool = this.itemDelay - 1;
+                    }
                     return;
                 }
                 this.bulk = null;
@@ -196,8 +204,11 @@ final class Macro {
                     }
                 }
                 if (this.bulkIdx < this.bulk.size()) {
-                    mc.interactionManager.clickSlot(h.syncId, this.bulk.get(this.bulkIdx++), 1, SlotActionType.THROW, mc.player);
-                    this.cool = this.itemDelay - 1;
+                    int id = this.bulk.get(this.bulkIdx++);
+                    if (id < h.slots.size() && h.getSlot(id).hasStack()) {
+                        mc.interactionManager.clickSlot(h.syncId, id, 1, SlotActionType.THROW, mc.player);
+                        this.cool = this.itemDelay - 1;
+                    }
                     return;
                 }
                 this.bulk = null;
