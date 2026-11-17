@@ -26,7 +26,7 @@ extends Screen {
         int half = 98;
         int left = this.width / 2 - bw / 2;
         int right = left + bw - half;
-        int rows = 7;
+        int rows = 8;
         int y = Math.max(24, this.height / 2 - rows * gap / 2);
         this.titleY = y - 14;
         this.addDrawableChild(ButtonWidget.builder(Text.literal(MODE_NAMES[cfg.mode]), b -> {
@@ -58,6 +58,7 @@ extends Screen {
             b.setMessage(this.startText());
         }).dimensions(left, y += 3 * gap, half, 20).build());
         this.addDrawableChild(ButtonWidget.builder(Text.literal("Kapat"), b -> this.close()).dimensions(right, y, half, 20).build());
+        this.addDrawableChild(ButtonWidget.builder(Text.literal("Makrolar..."), b -> MinecraftClient.getInstance().setScreen(new AutoFarmMacroScreen(this.farm, 0))).dimensions(left, y + gap, bw, 20).build());
     }
 
     private Text startText() {

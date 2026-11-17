@@ -19,6 +19,37 @@ public class AutoFarmConfig {
     public boolean requireHoe = false;
     public boolean requireFortune = false;
     public final boolean[] crops = new boolean[]{true, true, true, true, true};
+    private static final String[][] MACRO_DEFAULTS = new String[][]{
+        {"m1c1", "/çiftçi"}, {"m1s1", "5"}, {"m1s2", "2"}, {"m1c2", "/order"}, {"m1s3", "1"},
+        {"m1f", ""}, {"m1s4", "1"}, {"m1rep", "0"},
+        {"m2c", "/çiftçi"}, {"m2s1", "5"}, {"m2s2", "2"}, {"m2f", ""},
+        {"delay", "10"}, {"itemDelay", "2"}};
+    private final java.util.Map<String, String> macro = new java.util.HashMap<String, String>();
+
+    public AutoFarmConfig() {
+        for (String[] d : MACRO_DEFAULTS) {
+            this.macro.put(d[0], d[1]);
+        }
+    }
+
+    public String mget(String k) {
+        String v = this.macro.get(k);
+        return v == null ? "" : v;
+    }
+
+    public void mset(String k, String v) {
+        this.macro.put(k, v);
+    }
+
+    public int mint(String k, int min, int max) {
+        int def = 0;
+        for (String[] d : MACRO_DEFAULTS) {
+            if (d[0].equals(k)) {
+                def = parse(d[1], 0);
+            }
+        }
+        return clamp(parse(this.macro.get(k), def), min, max);
+    }
 
     public static AutoFarmConfig get() {
         return INSTANCE;
@@ -46,6 +77,9 @@ public class AutoFarmConfig {
                 for (Crop c : Crop.values()) {
                     this.crops[c.ordinal()] = Boolean.parseBoolean(p.getProperty("crop." + c.name(), String.valueOf(this.crops[c.ordinal()])));
                 }
+                for (String[] d : MACRO_DEFAULTS) {
+                    this.macro.put(d[0], p.getProperty("macro." + d[0], this.macro.get(d[0])));
+                }
             }
             catch (IOException iOException) {
                 // empty catch block
@@ -61,6 +95,9 @@ public class AutoFarmConfig {
         p.setProperty("requireFortune", String.valueOf(this.requireFortune));
         for (Crop c : Crop.values()) {
             p.setProperty("crop." + c.name(), String.valueOf(this.crops[c.ordinal()]));
+        }
+        for (java.util.Map.Entry<String, String> e : this.macro.entrySet()) {
+            p.setProperty("macro." + e.getKey(), e.getValue());
         }
         try (OutputStream out = Files.newOutputStream(this.file(), new OpenOption[0]);){
             p.store(out, "AutoFarm ayarlari");

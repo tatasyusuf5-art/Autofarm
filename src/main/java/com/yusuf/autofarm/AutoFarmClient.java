@@ -85,6 +85,8 @@ implements ClientModInitializer {
     private final Map<BlockPos, Integer> replant = new HashMap<BlockPos, Integer>();
     private final Set<Integer> ignoredItems = new HashSet<Integer>();
     private final PlantBot plantBot = new PlantBot(this);
+    private final Macro macro = new Macro(this);
+    private boolean prevH = false;
 
     // PatatesBot hasat sistemi (Mod 1: Kır) için durum
     private boolean pbLevelPending = true;
@@ -108,6 +110,19 @@ implements ClientModInitializer {
                     this.openGui = true;
                     return 1;
                 }))
+                .then(ClientCommandManager.literal("macro")
+                    .then(ClientCommandManager.literal("1").executes(ctx -> {
+                        this.macro.start(MinecraftClient.getInstance(), 1);
+                        return 1;
+                    }))
+                    .then(ClientCommandManager.literal("2").executes(ctx -> {
+                        this.macro.start(MinecraftClient.getInstance(), 2);
+                        return 1;
+                    }))
+                    .then(ClientCommandManager.literal("stop").executes(ctx -> {
+                        this.macro.stop(MinecraftClient.getInstance(), "Makro durduruldu");
+                        return 1;
+                    })))
                 .then(ClientCommandManager.literal("mode")
                     .then(ClientCommandManager.argument("n", IntegerArgumentType.integer(1, MODE_NAMES.length)).executes(ctx -> {
                         this.cfg.mode = IntegerArgumentType.getInteger(ctx, "n") - 1;
@@ -125,12 +140,19 @@ implements ClientModInitializer {
                     })))));
     }
 
+    Macro macro() {
+        return this.macro;
+    }
+
     public boolean isEnabled() {
         return this.enabled;
     }
 
     public void toggle(MinecraftClient mc) {
         this.enabled = !this.enabled;
+        if (this.enabled && this.macro.isRunning()) {
+            this.macro.stop(mc, "Makro durduruldu (çiftlik başladı)");
+        }
         this.resetState(mc);
         String msg = "AutoFarm " + (this.enabled ? "AÇIK" : "KAPALI") + " | Mod " + MODE_NAMES[this.cfg.mode];
         this.say(mc, msg);
@@ -175,6 +197,16 @@ implements ClientModInitializer {
         if (this.announce && mc.player != null && mc.world != null) {
             this.announce = false;
             mc.player.sendMessage((Text)Text.literal((String)"[AutoFarm] Yüklendi. G = aç/kapat, R + G = menü, ya da /autofarm gui"), false);
+        }
+        this.macro.tick(mc);
+        if (this.macro.isRunning() && mc.player != null && !(mc.currentScreen instanceof AutoFarmMacroScreen)) {
+            boolean h = InputUtil.isKeyPressed((long)mc.getWindow().getHandle(), (int)72);
+            if (h && !this.prevH) {
+                this.macro.stop(mc, "Makro durduruldu (H)");
+            }
+            this.prevH = h;
+        } else {
+            this.prevH = false;
         }
         boolean g = false;
         boolean r = false;
