@@ -13,7 +13,6 @@ import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 
 public class AutoFarmConfig {
-    private static final AutoFarmConfig INSTANCE = new AutoFarmConfig();
     public int mode = 0;
     public int speed = 5;
     public boolean requireHoe = false;
@@ -24,6 +23,7 @@ public class AutoFarmConfig {
         {"m1f", ""}, {"m1s4", "1"}, {"m1rep", "0"},
         {"m2c", "/çiftçi"}, {"m2s1", "5"}, {"m2s2", "2"}, {"m2f", ""},
         {"delay", "10"}, {"itemDelay", "2"}};
+    private static final AutoFarmConfig INSTANCE = new AutoFarmConfig();
     private final java.util.Map<String, String> macro = new java.util.HashMap<String, String>();
 
     public AutoFarmConfig() {
@@ -144,4 +144,3 @@ public class AutoFarmConfig {
         }
     }
 }
-
