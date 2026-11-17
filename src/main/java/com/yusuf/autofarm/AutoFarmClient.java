@@ -88,6 +88,7 @@ implements ClientModInitializer {
 
     // PatatesBot hasat sistemi (Mod 1: Kır) için durum
     private boolean pbLevelPending = true;
+    private final Avoid pbAvoid = new Avoid();
     private BlockPos pbTarget = null;
     private int pbTicks = 0;
     private int pbLevelY = 0;
@@ -648,7 +649,7 @@ implements ClientModInitializer {
         return !s.getFluidState().isEmpty() ? false : !AutoFarmClient.isHazard(s.getBlock());
     }
 
-    private static boolean isHazard(Block b) {
+    static boolean isHazard(Block b) {
         return b == Blocks.FIRE || b == Blocks.SOUL_FIRE || b == Blocks.CACTUS || b == Blocks.SWEET_BERRY_BUSH || b == Blocks.COBWEB || b == Blocks.POWDER_SNOW || b == Blocks.MAGMA_BLOCK || b == Blocks.CAMPFIRE || b == Blocks.SOUL_CAMPFIRE || b == Blocks.WITHER_ROSE;
     }
 
@@ -723,6 +724,7 @@ implements ClientModInitializer {
         this.pbTicks = 0;
         this.pbSkip.clear();
         this.pbLevelPending = true;
+        this.pbAvoid.reset();
     }
 
     private void pbStopMove(MinecraftClient mc) {
@@ -760,9 +762,14 @@ implements ClientModInitializer {
         if (this.pbTarget == null || !this.pbIsCrop(mc, this.pbTarget)) {
             this.pbTarget = this.pbFindCrop(mc);
             this.pbTicks = 0;
+            this.pbAvoid.newTarget();
         }
         if (this.pbTarget == null) {
             this.pbStopMove(mc);
+            if (this.pbAvoid.drive(mc, null) == Avoid.Move.DROWNING) {
+                this.autoOff(mc, "Suda takıldı, bot kapandı");
+                return;
+            }
             if (--this.pbWait <= 0) {
                 this.say(mc, "Kırılacak ekin yok, bekliyorum...");
                 this.pbWait = 60;
@@ -774,12 +781,16 @@ implements ClientModInitializer {
         double dy = c.y - eye.y;
         double dz = c.z - eye.z;
         double hor = Math.sqrt(dx * dx + dz * dz);
-        mc.player.setYaw((float)(Math.toDegrees(Math.atan2(dz, dx)) - 90.0));
         mc.player.setPitch((float)MathHelper.clamp(-Math.toDegrees(Math.atan2(dy, hor)), -10.0, 45.0));
-        mc.options.forwardKey.setPressed(true);
-        mc.options.sprintKey.setPressed(true);
-        boolean lowAir = mc.player.isTouchingWater() && mc.player.getAir() < 120;
-        mc.options.jumpKey.setPressed(mc.player.horizontalCollision || lowAir);
+        Avoid.Move mv = this.pbAvoid.drive(mc, c);
+        if (mv == Avoid.Move.DROWNING) {
+            this.autoOff(mc, "Suda takıldı, bot kapandı");
+            return;
+        }
+        if (mv == Avoid.Move.BLOCKED) {
+            this.pbSkip.put(this.pbTarget.toImmutable(), now + 600L);
+            this.pbTarget = null;
+        }
         this.keysHeld = true;
         if (++this.pbTicks > 200) {
             this.pbSkip.put(this.pbTarget.toImmutable(), now + 600L);
