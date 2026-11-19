@@ -866,7 +866,7 @@ implements ClientModInitializer {
 
     private BlockPos pbGroundPos(MinecraftClient mc) {
         BlockPos p = mc.player.getBlockPos();
-        return mc.world.getBlockState(p).isOf(Blocks.FARMLAND) ? p : p.down();
+        return mc.world.getBlockState(p).getCollisionShape(mc.world, p).isEmpty() ? p.down() : p;
     }
 
     private static enum Kind {
