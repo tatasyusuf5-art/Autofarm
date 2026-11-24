@@ -12,9 +12,14 @@ import net.minecraft.screen.slot.Slot;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 
-/** Farmdan bagimsiz makrolar (komut + slot tiklama + esya koyma/atma). */
+/**
+ * Farmdan bagimsiz makrolar.
+ * 1 ve 2: hazir makrolar, 3: kullanicinin adim adim kurdugu ozel makro.
+ */
 final class Macro {
-    private enum T { CMD, CLICK, DEPOSIT, CLOSE, DROP }
+    /** CMD: komut, MSG: sohbet mesaji, CLICK: acik menude slota tikla, DEPOSIT: esyalari acik menuye koy,
+     *  CLOSE: menuyu kapat (E), DROP: esyalari yere at, WAIT: bekle, HOTBAR: hotbar slotu sec. */
+    private enum T { CMD, MSG, CLICK, DEPOSIT, CLOSE, DROP, WAIT, HOTBAR }
 
     private static final class Step {
         final T t;
@@ -38,9 +43,9 @@ final class Macro {
     private int wait = 0;
     private int delay = 10;
     private int itemDelay = 2;
+    private int cycleWait = 0;
     private int cycles = 0;
     private int repeat = 0;
-    private String filter = "";
     private List<Integer> bulk = null;
     private int bulkIdx = 0;
     private int bulkSync = -1;
@@ -53,45 +58,89 @@ final class Macro {
         return this.running;
     }
 
+    private String name() {
+        return this.which == 3 ? "Özel makro" : "Makro " + this.which;
+    }
+
     void start(MinecraftClient mc, int which) {
         if (mc.player == null || mc.world == null) {
             return;
         }
         AutoFarmConfig cfg = AutoFarmConfig.get();
-        if (this.host.isEnabled()) {
-            this.host.autoOff(mc, "Çiftlik durduruldu (makro başladı)");
-        }
-        this.steps.clear();
         this.which = which;
-        this.delay = cfg.mint("delay", 1, 100);
-        this.itemDelay = cfg.mint("itemDelay", 1, 40);
+        this.steps.clear();
+        this.cycleWait = 0;
         if (which == 1) {
-            this.filter = cfg.mget("m1f");
             this.repeat = cfg.mint("m1rep", 0, 100000);
             this.steps.add(new Step(T.CMD, cfg.mget("m1c1"), 0));
             this.steps.add(new Step(T.CLICK, "", cfg.mint("m1s1", 1, 200)));
             this.steps.add(new Step(T.CLICK, "", cfg.mint("m1s2", 1, 200)));
             this.steps.add(new Step(T.CMD, cfg.mget("m1c2"), 0));
             this.steps.add(new Step(T.CLICK, "", cfg.mint("m1s3", 1, 200)));
-            this.steps.add(new Step(T.DEPOSIT, "", 0));
+            this.steps.add(new Step(T.DEPOSIT, cfg.mget("m1f"), 0));
             this.steps.add(new Step(T.CLOSE, "", 0));
             this.steps.add(new Step(T.CLICK, "", cfg.mint("m1s4", 1, 200)));
             this.steps.add(new Step(T.CLOSE, "", 0));
-        } else {
-            this.filter = cfg.mget("m2f");
-            this.repeat = 1;
+        } else if (which == 2) {
+            this.repeat = cfg.mint("m2rep", 0, 100000);
             this.steps.add(new Step(T.CMD, cfg.mget("m2c"), 0));
             this.steps.add(new Step(T.CLICK, "", cfg.mint("m2s1", 1, 200)));
             this.steps.add(new Step(T.CLICK, "", cfg.mint("m2s2", 1, 200)));
-            this.steps.add(new Step(T.DROP, "", 0));
+            this.steps.add(new Step(T.DROP, cfg.mget("m2f"), 0));
+        } else {
+            this.repeat = cfg.mint("crep", 0, 100000);
+            this.cycleWait = secondsToTicks(cfg.mget("cwait"));
+            this.buildCustom(cfg);
+            if (this.steps.isEmpty()) {
+                this.say(mc, "Özel makroda hiç adım yok. Makrolar > Özel sekmesinden adım ekle.");
+                return;
+            }
         }
+        if (this.host.isEnabled()) {
+            this.host.autoOff(mc, "Çiftlik durduruldu (makro başladı)");
+        }
+        this.delay = cfg.mint("delay", 1, 100);
+        this.itemDelay = cfg.mint("itemDelay", 1, 40);
         this.idx = 0;
         this.cool = 0;
         this.wait = 0;
         this.cycles = 0;
         this.bulk = null;
         this.running = true;
-        this.say(mc, "Makro " + which + " başladı (durdurmak: H ya da /autofarm macro stop)");
+        this.say(mc, this.name() + " başladı (durdurmak: H ya da /autofarm macro stop)");
+    }
+
+    private void buildCustom(AutoFarmConfig cfg) {
+        for (String[] st : cfg.custom) {
+            String arg = st[1] == null ? "" : st[1].trim();
+            switch (st[0]) {
+                case "CMD":
+                    if (!arg.isEmpty()) {
+                        this.steps.add(arg.startsWith("/") ? new Step(T.CMD, arg, 0) : new Step(T.MSG, arg, 0));
+                    }
+                    break;
+                case "SLOT":
+                    this.steps.add(new Step(T.CLICK, "", clamp(parseInt(arg, 1), 1, 200)));
+                    break;
+                case "DEPOSIT":
+                    this.steps.add(new Step(T.DEPOSIT, arg, 0));
+                    break;
+                case "DROP":
+                    this.steps.add(new Step(T.DROP, arg, 0));
+                    break;
+                case "CLOSE":
+                    this.steps.add(new Step(T.CLOSE, "", 0));
+                    break;
+                case "WAIT":
+                    this.steps.add(new Step(T.WAIT, "", secondsToTicks(arg)));
+                    break;
+                case "HOTBAR":
+                    this.steps.add(new Step(T.HOTBAR, "", clamp(parseInt(arg, 1), 1, 9)));
+                    break;
+                default:
+                    break;
+            }
+        }
     }
 
     void stop(MinecraftClient mc, String msg) {
@@ -134,6 +183,14 @@ final class Macro {
                 this.next(mc);
                 return;
             }
+            case MSG: {
+                String m = s.s.trim();
+                if (!m.isEmpty()) {
+                    mc.player.networkHandler.sendChatMessage(m);
+                }
+                this.next(mc);
+                return;
+            }
             case CLICK: {
                 if (!this.hasContainer(mc)) {
                     this.waitGui(mc);
@@ -163,7 +220,7 @@ final class Macro {
                     this.bulkIdx = 0;
                     this.bulkSync = h.syncId;
                     for (Slot sl : h.slots) {
-                        if (sl.inventory == mc.player.getInventory() && sl.hasStack() && this.matches(sl.getStack())) {
+                        if (sl.inventory == mc.player.getInventory() && sl.hasStack() && matches(sl.getStack(), s.s)) {
                             this.bulk.add(sl.id);
                         }
                     }
@@ -198,7 +255,7 @@ final class Macro {
                     this.bulk = new ArrayList<Integer>();
                     this.bulkIdx = 0;
                     for (int i = 9; i <= 44 && i < h.slots.size(); ++i) {
-                        if (h.getSlot(i).hasStack() && this.matches(h.getSlot(i).getStack())) {
+                        if (h.getSlot(i).hasStack() && matches(h.getSlot(i).getStack(), s.s)) {
                             this.bulk.add(i);
                         }
                     }
@@ -212,6 +269,18 @@ final class Macro {
                     return;
                 }
                 this.bulk = null;
+                this.next(mc);
+                return;
+            }
+            case WAIT: {
+                this.next(mc);
+                if (this.running) {
+                    this.cool = Math.max(this.cool, s.n);
+                }
+                return;
+            }
+            case HOTBAR: {
+                mc.player.getInventory().setSelectedSlot(s.n - 1);
                 this.next(mc);
                 return;
             }
@@ -233,16 +302,18 @@ final class Macro {
         this.cool = this.delay;
         if (++this.idx >= this.steps.size()) {
             ++this.cycles;
-            if (this.which == 2 || (this.repeat > 0 && this.cycles >= this.repeat)) {
-                this.stop(mc, "Makro " + this.which + " tamamlandı");
+            if (this.repeat > 0 && this.cycles >= this.repeat) {
+                this.stop(mc, this.name() + " tamamlandı");
                 return;
             }
             this.idx = 0;
+            this.cool = Math.max(this.cool, this.cycleWait);
         }
     }
 
-    private boolean matches(ItemStack st) {
-        String f = this.filter.trim().toLowerCase();
+    /** Filtre bos ise her esya; doluysa virgullu parcalardan biri esya kimliginde ya da adinda gecmeli. */
+    private static boolean matches(ItemStack st, String filter) {
+        String f = filter == null ? "" : filter.trim().toLowerCase();
         if (f.isEmpty()) {
             return true;
         }
@@ -255,5 +326,27 @@ final class Macro {
             }
         }
         return false;
+    }
+
+    private static int parseInt(String s, int def) {
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (RuntimeException e) {
+            return def;
+        }
+    }
+
+    private static int clamp(int v, int lo, int hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+
+    /** "1.5" ya da "1,5" saniyeyi tick'e cevirir (en fazla 1 saat). */
+    private static int secondsToTicks(String s) {
+        try {
+            double sec = Double.parseDouble(s.trim().replace(',', '.'));
+            return clamp((int)Math.round(sec * 20.0), 0, 72000);
+        } catch (RuntimeException e) {
+            return 0;
+        }
     }
 }

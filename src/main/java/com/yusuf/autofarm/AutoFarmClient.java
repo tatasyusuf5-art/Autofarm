@@ -119,6 +119,10 @@ implements ClientModInitializer {
                         this.macro.start(MinecraftClient.getInstance(), 2);
                         return 1;
                     }))
+                    .then(ClientCommandManager.literal("3").executes(ctx -> {
+                        this.macro.start(MinecraftClient.getInstance(), 3);
+                        return 1;
+                    }))
                     .then(ClientCommandManager.literal("stop").executes(ctx -> {
                         this.macro.stop(MinecraftClient.getInstance(), "Makro durduruldu");
                         return 1;

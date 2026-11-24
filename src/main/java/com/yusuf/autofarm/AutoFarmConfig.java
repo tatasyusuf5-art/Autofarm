@@ -21,8 +21,14 @@ public class AutoFarmConfig {
     private static final String[][] MACRO_DEFAULTS = new String[][]{
         {"m1c1", "/çiftçi"}, {"m1s1", "5"}, {"m1s2", "2"}, {"m1c2", "/order"}, {"m1s3", "1"},
         {"m1f", ""}, {"m1s4", "1"}, {"m1rep", "0"},
-        {"m2c", "/çiftçi"}, {"m2s1", "5"}, {"m2s2", "2"}, {"m2f", ""},
+        {"m2c", "/çiftçi"}, {"m2s1", "5"}, {"m2s2", "2"}, {"m2f", ""}, {"m2rep", "0"},
+        {"crep", "0"}, {"cwait", "0"},
         {"delay", "10"}, {"itemDelay", "2"}};
+    /** Özel makro adım türleri (sırası ekrandaki düğmenin dönüş sırasıdır). */
+    public static final String[] STEP_TYPES = new String[]{"CMD", "SLOT", "DEPOSIT", "DROP", "CLOSE", "WAIT", "HOTBAR"};
+    public static final int MAX_STEPS = 60;
+    /** Her adım: {tür, parametre}. */
+    public final java.util.List<String[]> custom = new java.util.ArrayList<String[]>();
     private static final AutoFarmConfig INSTANCE = new AutoFarmConfig();
     private final java.util.Map<String, String> macro = new java.util.HashMap<String, String>();
 
@@ -80,6 +86,16 @@ public class AutoFarmConfig {
                 for (String[] d : MACRO_DEFAULTS) {
                     this.macro.put(d[0], p.getProperty("macro." + d[0], this.macro.get(d[0])));
                 }
+                this.custom.clear();
+                int n = AutoFarmConfig.clamp(AutoFarmConfig.parse(p.getProperty("custom.count"), 0), 0, MAX_STEPS);
+                for (int i = 0; i < n; ++i) {
+                    String type = p.getProperty("custom." + i + ".type", "CMD");
+                    boolean known = false;
+                    for (String t : STEP_TYPES) {
+                        known |= t.equals(type);
+                    }
+                    this.custom.add(new String[]{known ? type : "CMD", p.getProperty("custom." + i + ".arg", "")});
+                }
             }
             catch (IOException iOException) {
                 // empty catch block
@@ -98,6 +114,11 @@ public class AutoFarmConfig {
         }
         for (java.util.Map.Entry<String, String> e : this.macro.entrySet()) {
             p.setProperty("macro." + e.getKey(), e.getValue());
+        }
+        p.setProperty("custom.count", String.valueOf(this.custom.size()));
+        for (int i = 0; i < this.custom.size(); ++i) {
+            p.setProperty("custom." + i + ".type", this.custom.get(i)[0]);
+            p.setProperty("custom." + i + ".arg", this.custom.get(i)[1] == null ? "" : this.custom.get(i)[1]);
         }
         try (OutputStream out = Files.newOutputStream(this.file(), new OpenOption[0]);){
             p.store(out, "AutoFarm ayarlari");
